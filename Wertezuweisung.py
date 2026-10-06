@@ -811,18 +811,27 @@ def optimize(results, min_n=3, target_n=5, max_n=6, masked_runs=None, forced_run
 # ─────────────────────────────────────────────────────────────
 # GUI
 # ─────────────────────────────────────────────────────────────
-BG, FG, GRAY, LIGHT, BORDER = '#ffffff', '#111111', '#6b6b6b', '#f2f2f2', '#e0e0e0'
-ACCENT    = '#1f5fbf'   # Akzentfarbe für aktive Schritte / Links
-OK_FG     = '#2d6a2d'
-WARN_FG   = '#9a6700'
-ERR_FG    = '#b42318'
-DISABLED  = '#b5b5b5'
-FONT      = ('Arial', 10)
-FONT_SM   = ('Arial', 9)
-FONT_XS   = ('Arial', 8)
-FONT_B    = ('Arial', 10, 'bold')
-FONT_SMB  = ('Arial', 9, 'bold')
-FONT_H    = ('Arial', 13, 'bold')
+# Farben wie im Produktionsplaner Medichem
+HG         = '#EEF5FD'          # Fensterhintergrund (hellblau)
+KOPF_HG    = '#D8E9FA'          # Kopfbalken
+KARTE      = '#FFFFFF'          # weiße Karten
+KARTE_RAND = '#CBE1F6'
+KNOPF      = ('#D3E8FC', '#C2DEFA', '#AED2F6')   # normal / Maus drüber / gedrückt
+KNOPF_RAND = '#94C3EE'
+AUSWAHL    = '#CFE6FB'          # markierte Tabellenzeile
+BG, FG, GRAY, LIGHT, BORDER = KARTE, '#1F2A37', '#5F6368', '#F3F7FC', '#DCE6F2'
+ACCENT    = '#1B5E96'           # dunkles Blau für Überschriften / aktiven Schritt
+OK_FG     = '#2E7D4F'
+WARN_FG   = '#9A6700'
+ERR_FG    = '#B3261E'
+DISABLED  = '#9AA0A6'
+UI_FONT   = 'Segoe UI'
+FONT      = (UI_FONT, 10)
+FONT_SM   = (UI_FONT, 9)
+FONT_XS   = (UI_FONT, 8)
+FONT_B    = (UI_FONT, 10, 'bold')
+FONT_SMB  = (UI_FONT, 9, 'bold')
+FONT_H    = (UI_FONT, 13, 'bold')
 
 APP_TITLE = 'Analyte Comparison'
 
@@ -953,7 +962,30 @@ class ScrollFrame(tk.Frame):
         self.canvas.yview_moveto(0)
 
 
-class App(tk.Tk):
+def _dnd_verfuegbar():
+    """Drag & Drop nur, wenn tkinterdnd2 installiert ist UND sich wirklich laden lässt."""
+    try:
+        from tkinterdnd2 import TkinterDnD
+        probe = tk.Tk()
+        probe.withdraw()
+        try:
+            TkinterDnD._require(probe)
+        finally:
+            probe.destroy()
+        return True
+    except Exception:
+        return False
+
+
+if _dnd_verfuegbar():  # optional: PDFs ins Fenster ziehen
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _AppBase = TkinterDnD.Tk
+else:
+    DND_FILES = None
+    _AppBase = tk.Tk
+
+
+class App(_AppBase):
     STEPS = ['PDFs laden', 'Übersicht prüfen', 'Optimieren', 'Exportieren']
 
     def __init__(self):
@@ -965,7 +997,7 @@ class App(tk.Tk):
             self.state('zoomed')  # Vollbild beim Start (Windows)
         except tk.TclError:
             pass
-        self.configure(bg=BG)
+        self.configure(bg=HG)
 
         # ── Fachlicher Zustand ────────────────────────────────
         self.files      = []
@@ -1037,28 +1069,129 @@ class App(tk.Tk):
     # Aufbau
     # ══════════════════════════════════════════════════════════
     def _setup_styles(self):
+        """Modernes Aussehen wie im Produktionsplaner: Sun-Valley-Theme, sonst 'clam'."""
+        import tkinter.font as tkfont
+        for name in ('TkDefaultFont', 'TkTextFont', 'TkHeadingFont', 'TkMenuFont'):
+            try:
+                tkfont.nametofont(name).configure(family=UI_FONT, size=10)
+            except tk.TclError:
+                pass
         s = ttk.Style(self)
-        s.theme_use('clam')
-        s.configure('Treeview', background=BG, foreground=FG, rowheight=22,
-                    fieldbackground=BG, font=FONT_SM)
-        s.configure('Treeview.Heading', background=LIGHT, foreground=FG,
-                    font=FONT_SMB, relief='flat', padding=(4,4))
-        s.map('Treeview', background=[('selected','#dfe9f8')],
-                          foreground=[('selected',FG)])
-        s.configure('TNotebook', background=BG, borderwidth=0)
-        s.configure('TNotebook.Tab', font=FONT, padding=[18,6],
-                    background='#ececec', foreground=GRAY)
-        s.map('TNotebook.Tab', background=[('selected',BG)],
-                               foreground=[('selected',FG)])
-        s.configure('TProgressbar', background=ACCENT, troughcolor=LIGHT)
-        s.configure('Sash', sashthickness=6)
-        s.configure('TPanedwindow', background=BORDER)
-        # Ruhigere Optik für klassische Tk-Widgets
-        for cls in ('Checkbutton', 'Spinbox', 'Entry', 'Button'):
-            self.option_add(f'*{cls}.highlightThickness', 0)
-        self.option_add('*Checkbutton.borderWidth', 0)
-        self.option_add('*Spinbox.relief', 'solid')
-        self.option_add('*Spinbox.borderWidth', 1)
+        try:
+            import sv_ttk
+            sv_ttk.set_theme('light')
+            try:
+                self.tk.eval(f'set ttk::theme::sv_light::colors(-bg) {HG}; configure_colors')
+            except tk.TclError:
+                pass
+            self.modern = True
+        except Exception:
+            self.modern = False
+            s.theme_use('clam')
+            s.configure('.', background=HG, font=FONT)
+            s.configure('TButton', padding=(10, 5), relief='flat', background='#E4E7EB')
+            s.map('TButton', background=[('active', '#D5DAE0')])
+            s.configure('TNotebook', background=HG, borderwidth=0)
+            s.configure('TNotebook.Tab', padding=(14, 6), background='#E4E7EB')
+            s.map('TNotebook.Tab', background=[('selected', 'white')])
+            s.configure('Treeview', borderwidth=0)
+            s.configure('Treeview.Heading', background='#E9ECF0', relief='flat', padding=(4, 5))
+        s.configure('Treeview', rowheight=26, background='white', fieldbackground='white',
+                    foreground=FG, font=FONT_SM)
+        s.configure('Treeview.Heading', font=FONT_SMB)
+        s.map('Treeview', background=[('selected', AUSWAHL)],
+                          foreground=[('selected', '#0B2540')])
+        s.configure('TNotebook.Tab', font=FONT)
+        s.configure('TProgressbar', background=ACCENT)
+        self._glas(s)
+        self._check_styles = {}
+
+    # ── Glas-Look (runde Karten und Knöpfe) ───────────────────
+    def _rund_bild(self, r, fuellung, rand, hinter):
+        """Abgerundetes Rechteck (geglättet) als Bild für 9-teiliges Skalieren."""
+        def rgb(h):
+            return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+
+        def misch(a, b, t):
+            return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
+
+        f, rd, hg = rgb(fuellung), rgb(rand), rgb(hinter)
+        n = 2 * (r + 3) + 120
+        bild = tk.PhotoImage(master=self, width=n, height=n)
+
+        def zeile(y):
+            werte = []
+            for x in range(n):
+                cx = min(max(x + 0.5, r), n - r)
+                cy = min(max(y + 0.5, r), n - r)
+                d = ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2) ** 0.5
+                aussen = min(1.0, max(0.0, r - d + 0.5))
+                innen = min(1.0, max(0.0, r - 1 - d + 0.5))
+                c = misch(misch(hg, rd, aussen), f, innen)
+                werte.append('#%02x%02x%02x' % c)
+            return '{' + ' '.join(werte) + '}'
+
+        mitte = zeile(n // 2)
+        zeilen = [zeile(y) if y < r + 1 or y >= n - r - 1 else mitte for y in range(n)]
+        bild.put(' '.join(zeilen))
+        return bild
+
+    def _glas(self, s):
+        """Hellblaue Flächen, weiße Karten und hellblaue Knöpfe mit runden Ecken."""
+        s.configure('.', background=HG)
+        for name in ('TFrame', 'TLabel', 'TRadiobutton', 'TCheckbutton', 'TPanedwindow'):
+            s.configure(name, background=HG)
+        self._bilder = {}
+        try:
+            self._bilder['karte'] = self._rund_bild(10, KARTE, KARTE_RAND, HG)
+            for zust, farbe in zip(('normal', 'aktiv', 'gedrückt'), KNOPF):
+                self._bilder[zust] = self._rund_bild(8, farbe, KNOPF_RAND, HG)
+            s.element_create('Glas.rahmen', 'image', self._bilder['karte'],
+                             border=13, width=26, height=26, sticky='nsew')
+            s.layout('Glas.TFrame', [('Glas.rahmen', {'sticky': 'nsew'})])
+            s.element_create('Hell.rahmen', 'image', self._bilder['normal'],
+                             ('pressed', self._bilder['gedrückt']),
+                             ('active', self._bilder['aktiv']),
+                             border=11, width=22, height=22, sticky='nsew')
+            s.layout('Accent.TButton', [('Hell.rahmen', {'sticky': 'nsew', 'children': [
+                ('Button.padding', {'sticky': 'nsew', 'children': [
+                    ('Button.label', {'sticky': 'nsew'})]})]})])
+            s.configure('Accent.TButton', foreground=ACCENT, padding=(12, 0),
+                        font=(UI_FONT, 10, 'bold'), anchor='center')
+            s.map('Accent.TButton', foreground=[('pressed', '#0B2540'), ('disabled', DISABLED)])
+        except tk.TclError:
+            s.configure('Glas.TFrame', background=KARTE)
+        s.configure('Glas.TFrame', padding=(14, 10), background=KARTE)
+        s.configure('Karte.TFrame', background=KARTE)
+        s.configure('Karte.TLabel', background=KARTE)
+        s.configure('KarteTitel.TLabel', background=KARTE, foreground=ACCENT,
+                    font=(UI_FONT, 11, 'bold'))
+        s.configure('Klein.TLabel', foreground=GRAY, background=HG)
+
+    def _check(self, parent, text='', variable=None, command=None, bg=KARTE,
+               bold=False, fg=FG, state='normal', **kw):
+        """Moderne Checkbox (ttk) auf beliebigem Hintergrund."""
+        key = (bg, bold, fg)
+        name = self._check_styles.get(key)
+        if name is None:
+            name = f'C{len(self._check_styles)}.TCheckbutton'
+            ttk.Style(self).configure(name, background=bg, foreground=fg,
+                                      font=FONT_SMB if bold else FONT_SM)
+            self._check_styles[key] = name
+        cb = ttk.Checkbutton(parent, text=text, variable=variable, command=command,
+                             style=name, cursor='hand2', **kw)
+        if state == 'disabled':
+            cb.state(['disabled'])
+        return cb
+
+    def _card(self, parent, title=None, padding=(16, 10, 16, 12)):
+        """Weiße Karte mit runden Ecken; gibt (Karte, Inhaltsrahmen) zurück."""
+        card = ttk.Frame(parent, style='Glas.TFrame', padding=padding)
+        if title:
+            ttk.Label(card, text=title, style='KarteTitel.TLabel').pack(anchor='w', pady=(0, 6))
+        inner = tk.Frame(card, bg=KARTE)
+        inner.pack(fill='both', expand=True)
+        return card, inner
 
     def _build_menu(self):
         m = tk.Menu(self)
@@ -1107,63 +1240,60 @@ class App(tk.Tk):
         b('<F1>', lambda e: self._show_help())
 
     def _build(self):
-        # ── Kopfzeile ─────────────────────────────────────────
-        top = tk.Frame(self, bg=BG, padx=16, pady=10)
-        top.pack(fill='x')
-
-        logo = tk.Frame(top, bg=BG)
-        logo.pack(side='left')
-        tk.Label(logo, text='ANALYTE COMPARISON', font=('Arial',12,'bold'),
-                 bg=BG, fg=FG).pack(anchor='w')
-        self.plan_name_lbl = tk.Label(logo, text='Neue Planung', font=FONT_XS,
-                                      bg=BG, fg=GRAY)
+        # ── Kopfbalken ────────────────────────────────────────
+        bar = tk.Frame(self, bg=KOPF_HG)
+        bar.pack(fill='x')
+        logo = tk.Frame(bar, bg=KOPF_HG)
+        logo.pack(side='left', padx=18, pady=10)
+        tk.Label(logo, text='Analyte Comparison', bg=KOPF_HG, fg='#000000',
+                 font=(UI_FONT, 17, 'bold')).pack(anchor='w')
+        self.plan_name_lbl = tk.Label(logo, text='Neue Planung', font=FONT_SM,
+                                      bg=KOPF_HG, fg=ACCENT)
         self.plan_name_lbl.pack(anchor='w')
 
         # Schrittanzeige: zeigt, wo man im Ablauf steht
-        steps = tk.Frame(top, bg=BG)
-        steps.pack(side='left', padx=(40,0))
+        steps = tk.Frame(bar, bg=KOPF_HG)
+        steps.pack(side='left', padx=(36, 0))
         self._step_lbls = []
         for i, name in enumerate(self.STEPS):
             if i:
-                tk.Label(steps, text='›', font=FONT, bg=BG, fg=DISABLED).pack(side='left', padx=6)
-            lbl = tk.Label(steps, text=f'{i+1}  {name}', font=FONT_SM, bg=BG,
+                tk.Label(steps, text='›', font=(UI_FONT, 12), bg=KOPF_HG,
+                         fg=DISABLED).pack(side='left', padx=8)
+            lbl = tk.Label(steps, text=f'{i+1}  {name}', font=FONT, bg=KOPF_HG,
                            fg=DISABLED, cursor='hand2')
             lbl.pack(side='left')
             lbl.bind('<Button-1>', lambda e, i=i: self._goto_step(i))
             self._step_lbls.append(lbl)
 
-        # Wichtigste Aktionen rechts
-        act = tk.Frame(top, bg=BG)
-        act.pack(side='right')
+        act = tk.Frame(bar, bg=KOPF_HG)
+        act.pack(side='right', padx=18)
         self.export_top_btn = self._button(act, 'PDF exportieren…', self._export_opt, primary=True)
-        self.export_top_btn.pack(side='right', padx=(6,0))
+        self.export_top_btn.pack(side='right', padx=(8,0))
         Tooltip(self.export_top_btn, 'Planung als PDF speichern (Strg+E)')
-        self.save_btn = self._button(act, 'Speichern', self._save_planning, primary=False)
-        self.save_btn.pack(side='right', padx=(6,0))
+        self.save_btn = self._button(act, 'Speichern', self._save_planning, primary=True)
+        self.save_btn.pack(side='right', padx=(8,0))
         Tooltip(self.save_btn, 'Planung als .wz-Datei speichern (Strg+S)')
-        self.lod_chk = tk.Checkbutton(act, text='LOD-Werte anzeigen', variable=self.lod_on_var,
-                                      command=self._on_lod_toggle, font=FONT_SM, bg=BG,
-                                      activebackground=BG, cursor='hand2')
-        self.lod_chk.pack(side='right', padx=(6,12))
+        self.lod_chk = self._check(act, text='LOD-Werte anzeigen', variable=self.lod_on_var,
+                                   command=self._on_lod_toggle, bg=KOPF_HG)
+        self.lod_chk.pack(side='right', padx=(8,12))
         Tooltip(self.lod_chk, 'Statt ✓ wird die Nachweisgrenze (LOD) angezeigt.\n'
                               '★ markiert den niedrigsten LOD je Analyt. (Strg+L)')
-
-        tk.Frame(self, bg=BORDER, height=1).pack(fill='x')
+        tk.Frame(self, bg=KARTE_RAND, height=1).pack(fill='x')
 
         # ── Statusleiste (unten) ──────────────────────────────
-        sbar = tk.Frame(self, bg=LIGHT, padx=16, pady=4)
+        sbar = tk.Frame(self, bg=HG, padx=16, pady=5)
         sbar.pack(side='bottom', fill='x')
         self.status_var = tk.StringVar(value='')
         self.status_lbl = tk.Label(sbar, textvariable=self.status_var, font=FONT_SM,
-                                   fg=FG, bg=LIGHT, anchor='w')
+                                   fg=FG, bg=HG, anchor='w')
         self.status_lbl.pack(side='left', fill='x', expand=True)
-        self.progress = ttk.Progressbar(sbar, length=160, mode='determinate')
-        tk.Frame(self, bg=BORDER, height=1).pack(side='bottom', fill='x')
+        self.progress = ttk.Progressbar(sbar, length=180, mode='determinate')
+        tk.Frame(self, bg=KARTE_RAND, height=1).pack(side='bottom', fill='x')
 
-        # ── Hauptbereich: Seitenleiste | Tabs ─────────────────
+        # ── Hauptbereich: Seitenleiste | Reiter ───────────────
         pw = ttk.PanedWindow(self, orient='horizontal')
-        pw.pack(fill='both', expand=True)
-        side = tk.Frame(pw, bg=BG, padx=12, pady=10)
+        pw.pack(fill='both', expand=True, padx=12, pady=(12, 8))
+        side = ttk.Frame(pw)
         self._build_sidebar(side)
         pw.add(side, weight=0)
 
@@ -1173,66 +1303,72 @@ class App(tk.Tk):
         self._build_tab_opt()
         self.nb.bind('<<NotebookTabChanged>>', lambda e: self._update_ui_state())
 
+        if DND_FILES:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind('<<Drop>>', lambda e: self._on_drop(self.tk.splitlist(e.data)))
+
     def _button(self, parent, text, cmd, primary=True, small=False):
-        b = tk.Button(parent, text=text, command=cmd,
-            font=FONT_XS if small else FONT_SM,
-            bg=FG if primary else LIGHT, fg=BG if primary else FG,
-            relief='flat', padx=8 if small else 12, pady=2 if small else 5,
-            activebackground='#333' if primary else '#e2e2e2',
-            activeforeground=BG if primary else FG,
-            disabledforeground='#9a9a9a',
-            cursor='hand2', bd=0)
-        return b
+        """Hellblauer, runder Knopf (primär) bzw. schlichter Knopf (sekundär)."""
+        return ttk.Button(parent, text=text, command=cmd, cursor='hand2',
+                          style='Accent.TButton' if primary else 'TButton')
 
     def _section_title(self, parent, text, **pack):
-        lbl = tk.Label(parent, text=text, font=FONT_SMB, fg=GRAY, bg=parent['bg'])
-        lbl.pack(anchor='w', **({'pady': (0,4)} | pack))
+        bg = parent.cget('background') if isinstance(parent, tk.Frame) else KARTE
+        lbl = tk.Label(parent, text=text, font=(UI_FONT, 11, 'bold'), fg=ACCENT, bg=bg)
+        lbl.pack(anchor='w', **({'pady': (0,6)} | pack))
         return lbl
 
     # ── Seitenleiste: Dateien + Labore ────────────────────────
     def _build_sidebar(self, side):
-        side.configure(width=250)
-        hdr = tk.Frame(side, bg=BG)
-        hdr.pack(fill='x', pady=(0,4))
-        self.files_title = tk.Label(hdr, text='PDF-DATEIEN', font=FONT_SMB, fg=GRAY, bg=BG)
+        card, c = self._card(side)
+        card.pack(fill='x', padx=(0, 10))
+        hdr = tk.Frame(c, bg=KARTE)
+        hdr.pack(fill='x', pady=(0,6))
+        self.files_title = tk.Label(hdr, text='PDF-Dateien', font=(UI_FONT, 11, 'bold'),
+                                    fg=ACCENT, bg=KARTE)
         self.files_title.pack(side='left')
 
-        btns = tk.Frame(side, bg=BG)
-        btns.pack(fill='x', pady=(0,4))
-        add_b = self._button(btns, '+ Hinzufügen…', self._add_files, primary=True, small=True)
+        btns = tk.Frame(c, bg=KARTE)
+        btns.pack(fill='x', pady=(0,6))
+        add_b = self._button(btns, 'Hinzufügen…', self._add_files, primary=True)
         add_b.pack(side='left')
         Tooltip(add_b, 'Ringversuchs-PDFs auswählen (Strg+D).\nSie werden sofort eingelesen.')
-        self.remove_btn = self._button(btns, 'Entfernen', self._remove_file, primary=False, small=True)
-        self.remove_btn.pack(side='left', padx=(4,0))
+        self.remove_btn = self._button(btns, 'Entfernen', self._remove_file, primary=False)
+        self.remove_btn.pack(side='left', padx=(6,0))
         Tooltip(self.remove_btn, 'Markierte Datei(en) entfernen (Entf)')
 
-        fl = tk.Frame(side, bg=BORDER, padx=1, pady=1)
+        fl = tk.Frame(c, bg=KARTE_RAND, padx=1, pady=1)
         fl.pack(fill='x')
-        fi = tk.Frame(fl, bg=BG)
+        fi = tk.Frame(fl, bg=KARTE)
         fi.pack(fill='both', expand=True)
         sb_y = ttk.Scrollbar(fi, orient='vertical')
-        self.file_lb = tk.Listbox(fi, yscrollcommand=sb_y.set, font=FONT_SM, height=8,
-            bg=BG, fg=FG, selectbackground='#dfe9f8', selectforeground=FG,
+        self.file_lb = tk.Listbox(fi, yscrollcommand=sb_y.set, font=FONT_SM, height=7,
+            bg=KARTE, fg=FG, selectbackground=AUSWAHL, selectforeground='#0B2540',
             relief='flat', bd=0, activestyle='none', selectmode='extended',
-            highlightthickness=0, width=28)
+            highlightthickness=0, width=26)
         sb_y.config(command=self.file_lb.yview)
         sb_y.pack(side='right', fill='y')
-        self.file_lb.pack(side='left', fill='both', expand=True, padx=4, pady=2)
+        self.file_lb.pack(side='left', fill='both', expand=True, padx=6, pady=4)
         self.file_lb.bind('<Delete>', lambda e: self._remove_file())
         self.file_lb.bind('<BackSpace>', lambda e: self._remove_file())
         self.file_lb.bind('<<ListboxSelect>>', lambda e: self._update_ui_state())
+        hint = ('PDFs einfach ins Fenster ziehen.' if DND_FILES else
+                'PDFs über „Hinzufügen…“ laden.')
+        tk.Label(c, text=hint, font=FONT_XS, fg=ACCENT, bg=KARTE).pack(anchor='w', pady=(6,0))
 
         # Labore
-        lh = tk.Frame(side, bg=BG)
-        lh.pack(fill='x', pady=(16,2))
-        tk.Label(lh, text='LABORE', font=FONT_SMB, fg=GRAY, bg=BG).pack(side='left')
-        msr = tk.Label(lh, text='Messungen', font=FONT_XS, fg=GRAY, bg=BG)
+        card2, c2 = self._card(side)
+        card2.pack(fill='both', expand=True, padx=(0, 10), pady=(10, 0))
+        lh = tk.Frame(c2, bg=KARTE)
+        lh.pack(fill='x', pady=(0,2))
+        tk.Label(lh, text='Labore', font=(UI_FONT, 11, 'bold'), fg=ACCENT, bg=KARTE).pack(side='left')
+        msr = tk.Label(lh, text='Messungen', font=FONT_XS, fg=GRAY, bg=KARTE)
         msr.pack(side='right')
         Tooltip(msr, 'Wie oft das Labor misst.\nZählt entsprechend mehrfach in der Abdeckung (n).')
-        tk.Label(side, text='Häkchen entfernen = Labor nicht berücksichtigen',
-                 font=FONT_XS, fg=GRAY, bg=BG, anchor='w', justify='left',
-                 wraplength=220).pack(anchor='w', pady=(0,4))
-        self.lab_list = ScrollFrame(side, width=190)
+        tk.Label(c2, text='Häkchen entfernen = Labor nicht berücksichtigen',
+                 font=FONT_XS, fg=GRAY, bg=KARTE, anchor='w', justify='left',
+                 wraplength=220).pack(anchor='w', pady=(0,6))
+        self.lab_list = ScrollFrame(c2, width=200)
         self.lab_list.pack(fill='both', expand=True)
 
     def _refresh_lab_list(self):
@@ -1249,10 +1385,9 @@ class App(tk.Tk):
             av = tk.BooleanVar(value=lab not in self.masked)
             self._lab_active_vars[lab] = av
             has_data = bool(r.get('analytes'))
-            cb = tk.Checkbutton(row, text=lab, variable=av, font=FONT_SM, bg=BG,
-                                activebackground=BG, anchor='w', cursor='hand2',
-                                fg=FG if has_data else ERR_FG,
-                                command=lambda l=lab: self._toggle_mask(l))
+            cb = self._check(row, text=lab, variable=av,
+                             fg=FG if has_data else ERR_FG,
+                             command=lambda l=lab: self._toggle_mask(l))
             cb.pack(side='left', fill='x', expand=True)
             tip = r.get('filename', '')
             if r.get('product'):
@@ -1263,8 +1398,8 @@ class App(tk.Tk):
             Tooltip(cb, tip)
             cv = tk.IntVar(value=self.lab_measure_count.get(lab, 1))
             self._lab_count_vars[lab] = cv
-            sp = tk.Spinbox(row, from_=1, to=20, width=3, textvariable=cv, font=FONT_SM,
-                            justify='right', command=lambda l=lab: self._on_count_spin(l))
+            sp = ttk.Spinbox(row, from_=1, to=20, width=2, textvariable=cv,
+                             justify='right', command=lambda l=lab: self._on_count_spin(l))
             sp.pack(side='right')
             sp.bind('<FocusOut>', lambda e, l=lab: self._on_count_spin(l))
             sp.bind('<Return>',   lambda e, l=lab: self._on_count_spin(l))
@@ -1276,18 +1411,17 @@ class App(tk.Tk):
 
     # ── Tab 1: Übersicht ──────────────────────────────────────
     def _build_tab_overview(self):
-        tab = tk.Frame(self.nb, bg=BG)
-        self.nb.add(tab, text='Übersicht')
-        self.ov_stack = tk.Frame(tab, bg=BG)
-        self.ov_stack.pack(fill='both', expand=True, padx=8, pady=8)
+        tab = ttk.Frame(self.nb, padding=(0, 10, 0, 0))
+        self.nb.add(tab, text='  Übersicht  ')
+        self.ov_stack = tab
 
-        # Tabelle
-        self.ov_table_frame = tk.Frame(self.ov_stack, bg=BG)
-        tf = tk.Frame(self.ov_table_frame, bg=BG)
+        # Tabelle in einer Karte
+        self.ov_table_frame, inner = self._card(tab, 'Welches Labor misst welchen Analyten?')
+        tf = tk.Frame(inner, bg=KARTE)
         tf.pack(fill='both', expand=True)
         self.tree = self._tree(tf)
         self.tree.bind('<Button-3>', lambda e: self._heading_menu(self.tree, e))
-        self._legend(self.ov_table_frame, [
+        self._legend(inner, [
             ('✓', 'Labor misst den Analyten'),
             ('○', 'nur in einem deaktivierten Labor'),
             ('2✓', 'Labor misst mehrfach'),
@@ -1295,41 +1429,44 @@ class App(tk.Tk):
         ], hint='Rechtsklick auf einen Laborkopf: Labor ein-/ausblenden, Messungen setzen')
 
         # Leerer Zustand: erklärt, was zu tun ist
-        self.ov_empty = self._empty_state(self.ov_stack,
+        self.ov_empty = self._empty_state(tab,
             'Noch keine Daten',
-            'Füge die Ringversuchs-PDFs der Labore hinzu.\n'
-            'Sie werden automatisch eingelesen und hier als Tabelle angezeigt.',
+            'Füge die Ringversuchs-PDFs der Labore hinzu' +
+            (' oder ziehe sie einfach ins Fenster.' if DND_FILES else '.') +
+            '\nSie werden automatisch eingelesen und hier als Tabelle angezeigt.',
             [('PDF-Dateien hinzufügen…', self._add_files, True),
              ('Gespeicherte Planung öffnen…', self._load_planning, False)])
 
     def _empty_state(self, parent, title, text, actions):
-        f = tk.Frame(parent, bg=BG)
-        box = tk.Frame(f, bg=BG)
-        box.place(relx=0.5, rely=0.4, anchor='center')
-        tk.Label(box, text=title, font=FONT_H, bg=BG, fg=FG).pack(pady=(0,6))
-        lbl = tk.Label(box, text=text, font=FONT, bg=BG, fg=GRAY, justify='center')
-        lbl.pack(pady=(0,16))
-        row = tk.Frame(box, bg=BG)
+        f, inner = self._card(parent)
+        box = tk.Frame(inner, bg=KARTE)
+        box.place(relx=0.5, rely=0.42, anchor='center')
+        tk.Label(box, text='📄', font=(UI_FONT, 30), bg=KARTE, fg=ACCENT).pack()
+        tk.Label(box, text=title, font=(UI_FONT, 15, 'bold'), bg=KARTE, fg=FG).pack(pady=(4,6))
+        lbl = tk.Label(box, text=text, font=FONT, bg=KARTE, fg=GRAY, justify='center')
+        lbl.pack(pady=(0,18))
+        row = tk.Frame(box, bg=KARTE)
         row.pack()
         f._btns = []
         for label, cmd, primary in actions:
             b = self._button(row, label, cmd, primary=primary)
-            b.pack(side='left', padx=4)
+            b.pack(side='left', padx=5)
             f._btns.append(b)
         f._text_lbl = lbl
         return f
 
     def _legend(self, parent, items, hint=''):
-        leg = tk.Frame(parent, bg=BG)
-        leg.pack(fill='x', pady=(6,0))
+        bg = KARTE
+        leg = tk.Frame(parent, bg=bg)
+        leg.pack(fill='x', pady=(8,0))
         for sym, txt in items:
             if sym.startswith('#'):
-                tk.Label(leg, text='   ', bg=sym, relief='solid', bd=1).pack(side='left', padx=(0,4))
+                tk.Label(leg, text='    ', bg=sym, relief='solid', bd=1).pack(side='left', padx=(0,5))
             else:
-                tk.Label(leg, text=sym, font=FONT_SMB, bg=BG, fg=FG).pack(side='left', padx=(0,4))
-            tk.Label(leg, text=txt, font=FONT_XS, bg=BG, fg=GRAY).pack(side='left', padx=(0,14))
+                tk.Label(leg, text=sym, font=FONT_SMB, bg=bg, fg=FG).pack(side='left', padx=(0,4))
+            tk.Label(leg, text=txt, font=FONT_XS, bg=bg, fg=GRAY).pack(side='left', padx=(0,14))
         if hint:
-            tk.Label(leg, text=hint, font=FONT_XS, bg=BG, fg=GRAY).pack(side='right')
+            tk.Label(leg, text=hint, font=FONT_XS, bg=bg, fg=GRAY).pack(side='right')
         return leg
 
     def _tree(self, parent):
@@ -1340,36 +1477,36 @@ class App(tk.Tk):
         hsb.pack(side='bottom', fill='x')
         vsb.pack(side='right', fill='y')
         t.pack(fill='both', expand=True)
-        t.tag_configure('group',    background='#e9e9e9', font=FONT_SMB)
-        t.tag_configure('alt',      background='#fafafa')
-        t.tag_configure('normal',   background=BG)
-        t.tag_configure('inactive', background='#f0f0f0', foreground='#aaaaaa')
-        t.tag_configure('ok5',      background='#e8f5e9')
-        t.tag_configure('ok3',      background='#fff9e6')
-        t.tag_configure('low',      background='#fdecea')
+        t.tag_configure('group',    background='#E3EDF9', foreground=ACCENT, font=FONT_SMB)
+        t.tag_configure('alt',      background='#F7FAFE')
+        t.tag_configure('normal',   background=KARTE)
+        t.tag_configure('inactive', background='#F5F5F5', foreground='#9AA0A6')
+        t.tag_configure('ok5',      background='#E6F4EA')
+        t.tag_configure('ok3',      background='#FFF3CD')
+        t.tag_configure('low',      background='#FBE3E1')
         return t
 
-    # ── Tab 2: Optimierung ────────────────────────────────────
     def _build_tab_opt(self):
-        tab = tk.Frame(self.nb, bg=BG)
-        self.nb.add(tab, text='Optimierung')
+        tab = ttk.Frame(self.nb, padding=(0, 10, 0, 0))
+        self.nb.add(tab, text='  Optimierung  ')
 
-        # Kontrollleiste
-        ctrl = tk.Frame(tab, bg=LIGHT, padx=12, pady=8)
+        # Steuerung + Ergebnis in einer Karte
+        ctrl_card, cc = self._card(tab, padding=(16, 10, 16, 10))
+        ctrl_card.pack(fill='x')
+        ctrl = tk.Frame(cc, bg=KARTE)
         ctrl.pack(fill='x')
 
         def spin(label, var, tip):
-            box = tk.Frame(ctrl, bg=LIGHT)
-            box.pack(side='left', padx=(0,14))
-            l = tk.Label(box, text=label, font=FONT_SM, bg=LIGHT, fg=FG)
-            l.pack(side='left', padx=(0,4))
-            s = tk.Spinbox(box, from_=1, to=20, width=3, textvariable=var, font=FONT_SM,
-                           justify='right')
-            s.pack(side='left')
-            Tooltip(l, tip); Tooltip(s, tip)
+            box = tk.Frame(ctrl, bg=KARTE)
+            box.pack(side='left', padx=(0,10))
+            l = tk.Label(box, text=label, font=FONT, bg=KARTE, fg=FG)
+            l.pack(side='left', padx=(0,5))
+            sp = ttk.Spinbox(box, from_=1, to=20, width=2, textvariable=var, justify='right')
+            sp.pack(side='left')
+            Tooltip(l, tip); Tooltip(sp, tip)
 
-        tk.Label(ctrl, text='Abdeckung je Analyt:', font=FONT_SMB, bg=LIGHT,
-                 fg=FG).pack(side='left', padx=(0,10))
+        tk.Label(ctrl, text='Abdeckung je Analyt', font=(UI_FONT, 11, 'bold'), bg=KARTE,
+                 fg=ACCENT).pack(side='left', padx=(0,14))
         spin('mindestens', self.min_n_var,
              'Jeder Analyt soll von mindestens so vielen Laboren gemessen werden.\n'
              'Analyten darunter werden rot markiert.')
@@ -1379,7 +1516,7 @@ class App(tk.Tk):
              'Über dieser Anzahl werden keine weiteren Runs für einen Analyten hinzugefügt.')
 
         self.opt_btn = self._button(ctrl, 'Optimieren  (F5)', self._run_opt, primary=True)
-        self.opt_btn.pack(side='left', padx=(4,6))
+        self.opt_btn.pack(side='left', padx=(6,6))
         Tooltip(self.opt_btn, 'Günstigste Kombination von Laboren und Runs berechnen,\n'
                               'die die gewünschte Abdeckung erreicht.')
         self.all_btn = self._button(ctrl, 'Alle Labore übernehmen', self._show_all_labs_overview,
@@ -1391,20 +1528,27 @@ class App(tk.Tk):
         self.opt_preview_btn.pack(side='right')
         Tooltip(self.opt_preview_btn, 'PDF-Vorschau öffnen (ohne zu speichern)')
 
-        # Ergebniszeile
-        res = tk.Frame(tab, bg=BG, padx=12, pady=6)
-        res.pack(fill='x')
+        res = tk.Frame(cc, bg=KARTE)
+        res.pack(fill='x', pady=(8,0))
         self.opt_status = tk.StringVar(value='')
-        self.opt_status_lbl = tk.Label(res, textvariable=self.opt_status, font=FONT_B,
-                                       fg=FG, bg=BG, anchor='w')
+        self.opt_status_lbl = tk.Label(res, textvariable=self.opt_status, font=(UI_FONT, 11, 'bold'),
+                                       fg=FG, bg=KARTE, anchor='w')
         self.opt_status_lbl.pack(side='left')
         self.opt_hint = tk.StringVar(value='')
         self.opt_hint_lbl = tk.Label(res, textvariable=self.opt_hint, font=FONT_SM,
-                                     fg=WARN_FG, bg=BG, anchor='w')
-        self.opt_hint_lbl.pack(side='left', padx=(14,0))
-        tk.Frame(tab, bg=BORDER, height=1).pack(fill='x')
+                                     fg=WARN_FG, bg=KARTE, anchor='w')
+        self.opt_hint_lbl.pack(side='left', padx=(16,0))
 
-        self.opt_stack = tk.Frame(tab, bg=BG)
+        # Fußzeile mit Export
+        foot = ttk.Frame(tab, padding=(0, 8, 0, 0))
+        foot.pack(side='bottom', fill='x')
+        self.opt_export_btn = self._button(foot, 'PDF exportieren…', self._export_opt, primary=True)
+        self.opt_export_btn.pack(side='right')
+        self.opt_archive_btn = self._button(foot, 'Archivieren…', self._archive_planning, primary=False)
+        self.opt_archive_btn.pack(side='right', padx=(0,8))
+        Tooltip(self.opt_archive_btn, 'PDF und Planung (.wz) gemeinsam im Archiv-Ordner ablegen')
+
+        self.opt_stack = ttk.Frame(tab, padding=(0, 10, 0, 0))
         self.opt_stack.pack(fill='both', expand=True)
 
         self.opt_empty = self._empty_state(self.opt_stack,
@@ -1418,16 +1562,15 @@ class App(tk.Tk):
         self.opt_body = ttk.PanedWindow(self.opt_stack, orient='horizontal')
 
         # Links: Auswahl je Labor
-        left = tk.Frame(self.opt_body, bg=BG, padx=10, pady=10)
-        self._section_title(left, 'AUSWAHL JE LABOR')
-        lh = tk.Frame(left, bg=BG)
+        lcard, left = self._card(self.opt_body, 'Auswahl je Labor')
+        lh = tk.Frame(left, bg=KARTE)
         lh.pack(fill='x', padx=(0,18))
         for txt, w, tip in [
                 ('Probe', 5, 'Run wird für die Proben gemessen'),
                 ('Ref', 4, 'Run wird auch für die Referenzproben gemessen'),
                 ('Run / Kosten', 0, 'Klick auf den Namen schaltet Probe und Ref zusammen'),
                 ('Fix', 3, 'Run beim erneuten Optimieren immer behalten')]:
-            l = tk.Label(lh, text=txt, font=FONT_XS, fg=GRAY, bg=BG, width=w or None,
+            l = tk.Label(lh, text=txt, font=FONT_XS, fg=GRAY, bg=KARTE, width=w or None,
                          anchor='w' if not w else 'center')
             l.pack(side='right' if txt == 'Fix' else 'left',
                    fill='x' if not w else None, expand=not w)
@@ -1436,74 +1579,65 @@ class App(tk.Tk):
         self.opt_lab_scroll = ScrollFrame(left, width=300)
         self.opt_lab_scroll.pack(fill='both', expand=True)
         self.opt_lab_frame = self.opt_lab_scroll.inner
-        self.opt_body.add(left, weight=0)
+        self.opt_body.add(lcard, weight=0)
 
         # Mitte: Abdeckungstabelle
-        mid = tk.Frame(self.opt_body, bg=BG, padx=8, pady=10)
-        self._section_title(mid, 'ABDECKUNG')
-        tf = tk.Frame(mid, bg=BG)
+        mid_wrap = ttk.Frame(self.opt_body, padding=(10, 0, 10, 0))
+        mcard, mid = self._card(mid_wrap, 'Abdeckung')
+        mcard.pack(fill='both', expand=True)
+        tf = tk.Frame(mid, bg=KARTE)
         tf.pack(fill='both', expand=True)
         self.opt_tree = self._tree(tf)
         self.opt_tree.bind('<Button-3>', self._opt_rightclick)
         self._legend(mid, [
-            ('#e8f5e9', 'Ziel erreicht'),
-            ('#fff9e6', 'Minimum erreicht'),
-            ('#fdecea', 'unter Minimum'),
+            ('#E6F4EA', 'Ziel erreicht'),
+            ('#FFF3CD', 'Minimum erreicht'),
+            ('#FBE3E1', 'unter Minimum'),
             ('(A)', 'gewählte Runs'),
-            ('[B]', 'weitere Runs, nicht gewählt'),
-        ], hint='Rechtsklick: Labor/Run ein- oder ausblenden')
-        self.opt_body.add(mid, weight=1)
+            ('[B]', 'nicht gewählt'),
+        ])
+        self.opt_body.add(mid_wrap, weight=1)
 
         # Rechts: Kosten, Probenrechner, Chargen
-        right = tk.Frame(self.opt_body, bg=BG, pady=10)
+        rcard, right = self._card(self.opt_body, padding=(6, 10, 6, 10))
         self.opt_right = ScrollFrame(right, width=275, padx=10)
         self.opt_right.pack(fill='both', expand=True)
         r = self.opt_right.inner
 
-        self._section_title(r, 'KOSTEN PRO PROBE')
-        self.opt_cost_frame_container = tk.Frame(r, bg=BG)
+        self._section_title(r, 'Kosten pro Probe')
+        self.opt_cost_frame_container = tk.Frame(r, bg=KARTE)
         self.opt_cost_frame_container.pack(fill='x')
-        self.opt_cost_frame = tk.Frame(self.opt_cost_frame_container, bg=BG)
+        self.opt_cost_frame = tk.Frame(self.opt_cost_frame_container, bg=KARTE)
         self.opt_cost_frame.pack(fill='x')
 
         tk.Frame(r, bg=BORDER, height=1).pack(fill='x', pady=(12,10))
-        self._section_title(r, 'PROBENRECHNER')
+        self._section_title(r, 'Probenrechner')
         for label, var, lo, tip in [
                 ('Proben', self.opt_probe_var, 0, 'Anzahl Proben pro Messtag'),
                 ('Referenzproben', self.opt_ref_var, 0, 'Anzahl Referenzproben pro Messtag'),
                 ('Messtage', self.opt_messtage_var, 1, 'Alle Mengen werden mit den Messtagen multipliziert')]:
-            row = tk.Frame(r, bg=BG)
-            row.pack(fill='x', pady=2)
-            l = tk.Label(row, text=label, font=FONT_SM, fg=FG, bg=BG, anchor='w')
+            row = tk.Frame(r, bg=KARTE)
+            row.pack(fill='x', pady=3)
+            l = tk.Label(row, text=label, font=FONT, fg=FG, bg=KARTE, anchor='w')
             l.pack(side='left', fill='x', expand=True)
-            sb = tk.Spinbox(row, from_=lo, to=9999, width=6, textvariable=var,
-                            font=FONT_SM, justify='right')
+            sb = ttk.Spinbox(row, from_=lo, to=9999, width=4, textvariable=var, justify='right')
             sb.pack(side='right')
             Tooltip(l, tip)
 
-        self.opt_ref_frame = tk.Frame(r, bg=BG)
+        self.opt_ref_frame = tk.Frame(r, bg=KARTE)
         self.opt_ref_frame.pack(fill='x')
 
         tk.Frame(r, bg=BORDER, height=1).pack(fill='x', pady=(10,8))
-        self._section_title(r, 'GESAMTKOSTEN')
-        self.opt_probe_lbl = tk.Label(r, text='', font=FONT_SM, fg=FG, bg=BG,
+        self._section_title(r, 'Gesamtkosten')
+        self.opt_probe_lbl = tk.Label(r, text='', font=FONT_SM, fg=FG, bg=KARTE,
                                       anchor='w', justify='left')
         self.opt_probe_lbl.pack(anchor='w', fill='x')
 
         tk.Frame(r, bg=BORDER, height=1).pack(fill='x', pady=(10,8))
-        self._section_title(r, 'CHARGEN')
-        self._batch_container = tk.Frame(r, bg=BG)
+        self._section_title(r, 'Chargen')
+        self._batch_container = tk.Frame(r, bg=KARTE)
         self._batch_container.pack(fill='x')
-        self.opt_body.add(right, weight=0)
-
-        tk.Frame(tab, bg=BORDER, height=1).pack(fill='x')
-        foot = tk.Frame(tab, bg=BG, padx=12, pady=8)
-        foot.pack(fill='x')
-        self.opt_export_btn = self._button(foot, 'PDF exportieren…', self._export_opt, primary=True)
-        self.opt_export_btn.pack(side='right')
-        self.opt_archive_btn = self._button(foot, 'Archivieren…', self._archive_planning, primary=False)
-        self.opt_archive_btn.pack(side='right', padx=(0,6))
-        Tooltip(self.opt_archive_btn, 'PDF und Planung (.wz) gemeinsam im Archiv-Ordner ablegen')
+        self.opt_body.add(rcard, weight=0)
 
     # ══════════════════════════════════════════════════════════
     # Zustand der Oberfläche
@@ -1551,13 +1685,13 @@ class App(tk.Tk):
         cur = self._current_step()
         for i, lbl in enumerate(self._step_lbls):
             if i < cur:
-                lbl.config(fg=OK_FG, font=FONT_SM, text=f'✓  {self.STEPS[i]}')
+                lbl.config(fg=OK_FG, font=FONT, text=f'✓  {self.STEPS[i]}')
             elif i == cur:
-                lbl.config(fg=ACCENT, font=FONT_SMB, text=f'{i+1}  {self.STEPS[i]}')
+                lbl.config(fg=ACCENT, font=FONT_B, text=f'{i+1}  {self.STEPS[i]}')
             else:
-                lbl.config(fg=DISABLED, font=FONT_SM, text=f'{i+1}  {self.STEPS[i]}')
+                lbl.config(fg=DISABLED, font=FONT, text=f'{i+1}  {self.STEPS[i]}')
 
-        self.files_title.config(text=f'PDF-DATEIEN ({len(self.files)})' if has_files else 'PDF-DATEIEN')
+        self.files_title.config(text=f'PDF-Dateien ({len(self.files)})' if has_files else 'PDF-Dateien')
         self.remove_btn.config(state='normal' if self.file_lb.curselection() and not busy else 'disabled')
 
         exp = 'normal' if has_opt and not busy else 'disabled'
@@ -1615,11 +1749,24 @@ class App(tk.Tk):
     # ══════════════════════════════════════════════════════════
     # Dateien
     # ══════════════════════════════════════════════════════════
-    def _add_files(self):
+    def _on_drop(self, paths):
+        """PDFs oder eine .wz-Planung ins Fenster gezogen."""
+        wz = [p for p in paths if p.lower().endswith('.wz')]
+        if wz:
+            self._load_planning(wz[0])
+            return
+        pdfs = [p for p in paths if p.lower().endswith('.pdf')]
+        if not pdfs:
+            self._set_status('Nur PDF-Dateien (oder eine .wz-Planung) können hineingezogen werden.', 'warn')
+            return
+        self._add_files(pdfs)
+
+    def _add_files(self, paths=None):
         if self._busy:
             return
-        paths = filedialog.askopenfilenames(
-            parent=self, title='PDF-Dateien auswählen', filetypes=[('PDF','*.pdf')])
+        if paths is None:
+            paths = filedialog.askopenfilenames(
+                parent=self, title='PDF-Dateien auswählen', filetypes=[('PDF','*.pdf')])
         new = [p for p in paths if p not in self.files]
         dup = len(paths) - len(new)
         for p in new:
@@ -2191,9 +2338,8 @@ class App(tk.Tk):
             lab = r['lab']
             if lab not in self.opt_ref_lab_vars:
                 self.opt_ref_lab_vars[lab] = tk.BooleanVar(value=True)
-            tk.Checkbutton(grid, text=lab, variable=self.opt_ref_lab_vars[lab],
-                           font=FONT_SM, bg=BG, activebackground=BG, cursor='hand2',
-                           command=self._on_probe_changed).grid(
+            self._check(grid, text=lab, variable=self.opt_ref_lab_vars[lab],
+                        command=self._on_probe_changed).grid(
                 row=i // 2, column=i % 2, sticky='w', padx=(0,10))
 
         self._calc_opt_probe()
@@ -2342,10 +2488,9 @@ class App(tk.Tk):
             hdr.pack(fill='x', pady=(8,1))
             av = tk.BooleanVar(value=not lab_masked)
             self._opt_row_vars.append(av)
-            cb = tk.Checkbutton(hdr, text=lab, variable=av, font=FONT_SMB,
-                                bg=BG, activebackground=BG, cursor='hand2',
-                                fg=FG if not lab_masked else GRAY,
-                                command=lambda l=lab: self._toggle_mask(l))
+            cb = self._check(hdr, text=lab, variable=av, bold=True,
+                             fg=FG if not lab_masked else GRAY,
+                             command=lambda l=lab: self._toggle_mask(l))
             cb.pack(side='left')
             Tooltip(cb, 'Labor berücksichtigen / nicht berücksichtigen')
             info = (f'{fmt_eur(c_probe)}' if lab_in_opt else
@@ -2394,12 +2539,10 @@ class App(tk.Tk):
                     self._mark_dirty()
                     self._rerun_opt_after_mask()
 
-                tk.Checkbutton(sub, variable=pv, command=on_probe, bg=bg,
-                               activebackground=bg, cursor='hand2', width=2).pack(side='left')
-                ref_cb = tk.Checkbutton(sub, variable=rv, command=on_ref, bg=bg,
-                                        activebackground=bg, cursor='hand2', width=2,
-                                        state='normal' if probe_on else 'disabled')
-                ref_cb.pack(side='left')
+                self._check(sub, variable=pv, command=on_probe, bg=bg).pack(side='left', padx=(4,8))
+                ref_cb = self._check(sub, variable=rv, command=on_ref, bg=bg,
+                                     state='normal' if probe_on else 'disabled')
+                ref_cb.pack(side='left', padx=(0,4))
 
                 fg = FG if probe_on else GRAY
                 name = tk.Label(sub, text=f'Run {rl}', font=FONT_SM, bg=bg, fg=fg,
@@ -2410,8 +2553,7 @@ class App(tk.Tk):
                 tk.Label(sub, text=f'({n_an})', font=FONT_XS, bg=bg,
                          fg=GRAY).pack(side='left', padx=(4,0))
 
-                fix_cb = tk.Checkbutton(sub, variable=fv, command=on_fix, bg=bg,
-                                        activebackground=bg, cursor='hand2')
+                fix_cb = self._check(sub, variable=fv, command=on_fix, bg=bg)
                 fix_cb.pack(side='right')
                 tk.Label(sub, text=fmt_eur(rc), font=FONT_XS, bg=bg, fg=fg).pack(side='right', padx=(0,6))
 
@@ -2672,12 +2814,13 @@ class App(tk.Tk):
         self._set_status(f'Gespeichert: {os.path.basename(path)}', 'ok')
         return True
 
-    def _load_planning(self):
+    def _load_planning(self, path=None):
         import json
         if self._busy or not self._confirm_discard():
             return
-        path = filedialog.askopenfilename(
-            parent=self, filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')])
+        if path is None:
+            path = filedialog.askopenfilename(
+                parent=self, filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')])
         if not path:
             return
         try:
@@ -2814,10 +2957,10 @@ class App(tk.Tk):
         dlg.bind('<Control-Return>', _ok)
 
         tk.Frame(dlg, bg=BORDER, height=1).pack(side='bottom', fill='x')
-        btn_row = tk.Frame(dlg, bg=LIGHT, padx=16, pady=10)
+        btn_row = tk.Frame(dlg, bg=HG, padx=16, pady=10)
         btn_row.pack(side='bottom', fill='x')
         tk.Label(btn_row, text='Strg+Enter = bestätigen · Esc = abbrechen',
-                 font=FONT_XS, fg=GRAY, bg=LIGHT).pack(side='left')
+                 font=FONT_XS, fg=GRAY, bg=HG).pack(side='left')
         self._button(btn_row, 'Abbrechen', dlg.destroy, primary=False).pack(side='right', padx=(8,0))
         ok_label = 'Archivieren' if action.startswith('Archiv') else 'Weiter …'
         self._button(btn_row, ok_label, _ok, primary=True).pack(side='right')

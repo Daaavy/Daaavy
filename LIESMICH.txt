@@ -3,7 +3,8 @@ Analyte Comparison / Wertezuweisung
 
 Starten (Windows)
   Doppelklick auf "Wertezuweisung_starten.bat".
-  Beim ersten Start werden die Zusatzpakete (pdfplumber, reportlab) automatisch
+  Beim ersten Start werden die Zusatzpakete (pdfplumber, reportlab, sv-ttk fuer
+  das moderne Aussehen, tkinterdnd2 zum Hineinziehen von PDFs) automatisch
   installiert. Voraussetzung: Python 3 ist installiert
   (https://www.python.org/downloads/, beim Installieren "Add python.exe to PATH" anhaken).
 
@@ -13,7 +14,7 @@ Starten (Windows)
 Alle Dateien im selben Ordner belassen.
 
 Ablauf
-  1. Links "+ Hinzufügen…" -> Ringversuchs-PDFs auswählen (werden sofort eingelesen)
+  1. Links "Hinzufügen…" oder PDFs ins Fenster ziehen (werden sofort eingelesen)
   2. Tab "Übersicht" prüfen, ggf. Labore links abwählen / Messungen einstellen
   3. Tab "Optimierung": Abdeckung einstellen, "Optimieren" (F5)
      Runs per Häkchen anpassen, rechts Proben / Referenzproben / Messtage eintragen

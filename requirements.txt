@@ -1,2 +1,6 @@
 pdfplumber
 reportlab
+# modernes Aussehen (wie Produktionsplaner)
+sv-ttk
+# PDFs ins Fenster ziehen
+tkinterdnd2
