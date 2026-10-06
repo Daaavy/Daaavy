@@ -17,6 +17,10 @@ where py >NUL 2>NUL && set PY=py -3
   pause
   exit /b 1
 )
-%PY% -m pip install --quiet --disable-pip-version-check pdfplumber reportlab || echo Hinweis: Zusatzpakete konnten nicht installiert werden - bitte Internetverbindung pruefen.
+REM Zusatzpakete nur installieren, wenn sie noch fehlen
+%PY% -c "import pdfplumber, reportlab" >NUL 2>NUL || (
+  echo Erster Start: Zusatzpakete werden installiert, bitte kurz warten ...
+  %PY% -m pip install --quiet --disable-pip-version-check --no-warn-script-location pdfplumber reportlab || echo Hinweis: Zusatzpakete konnten nicht installiert werden - bitte Internetverbindung pruefen.
+)
 %PY% Wertezuweisung.py
 if errorlevel 1 pause
