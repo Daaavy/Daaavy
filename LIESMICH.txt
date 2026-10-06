@@ -24,4 +24,17 @@ Tastenkürzel
   Strg+S Speichern · Strg+O Öffnen · Strg+N Neue Planung · Strg+E Export
   Strg+L LOD-Werte anzeigen · F5 Optimieren · F1 Kurzanleitung
 
-Bestehende .wz-Planungen können weiterhin geöffnet werden.
+Planungen speichern
+  Strg+S speichert die Planung unter einem Namen im Reiter "Meine Planungen".
+  Ab dann wird jede Änderung automatisch gespeichert (abschaltbar unter Datei).
+  Die PDFs werden in die Planung kopiert - sie lässt sich also auch dann
+  wieder öffnen, wenn die Original-PDFs verschoben oder gelöscht wurden.
+  Im Reiter "Meine Planungen" (Strg+O): Öffnen, Duplizieren (z. B. als Vorlage
+  für den nächsten Ringversuch), Umbenennen, Löschen, letztes PDF öffnen.
+  Beim Start gibt es den Knopf "Weiter mit ..." für die zuletzt bearbeitete Planung.
+
+  Gespeichert wird im Ordner "daten" neben dem Programm. Bei einem Update die
+  neue ZIP einfach über den alten Ordner entpacken - "daten" bleibt erhalten.
+  Gelöschte Planungen landen in "daten\papierkorb".
+
+Alte .wz-Dateien: Datei -> "Planung aus Datei öffnen (.wz)...", dann Strg+S.

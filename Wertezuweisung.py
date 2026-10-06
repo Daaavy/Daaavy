@@ -835,6 +835,42 @@ FONT_H    = (UI_FONT, 13, 'bold')
 
 APP_TITLE = 'Analyte Comparison'
 
+import json, shutil
+
+# Gespeicherte Planungen liegen in "daten/planungen" neben dem Programm.
+# Ein Update (neue ZIP darüber entpacken) rührt den Ordner "daten" nicht an.
+HERE = os.path.dirname(os.path.abspath(__file__))
+PLAN_FILE = 'planung.wz'
+
+
+def _data_dir():
+    """Datenordner: neben dem Programm, sonst (ohne Schreibrecht) unter Dokumente."""
+    for base in (os.path.join(HERE, 'daten'),
+                 os.path.join(os.path.expanduser('~'), 'Documents', 'Wertezuweisung', 'daten')):
+        try:
+            os.makedirs(os.path.join(base, 'planungen'), exist_ok=True)
+            probe = os.path.join(base, '.schreibtest')
+            with open(probe, 'w') as f:
+                f.write('ok')
+            os.remove(probe)
+            return base
+        except OSError:
+            continue
+    return None
+
+
+def _safe_folder_name(name):
+    n = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).strip(' .')
+    return n[:80] or 'Planung'
+
+
+def _write_json_atomic(path, data):
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
 
 def fmt_eur(v):
     s = f'{v:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
@@ -1017,6 +1053,17 @@ class App(_AppBase):
         self._last_export_meta = ('', '', '', {})
         self._dirty   = False          # ungespeicherte Änderungen
         self._busy    = False          # PDFs werden gerade eingelesen
+        self._plan_name = None         # Name der Planung (in "Meine Planungen")
+        self._last_pdf_path = None     # zuletzt exportiertes PDF dieser Planung
+        self._saved_at  = None         # Uhrzeit der letzten Speicherung
+        self._autosave_job   = None
+        self._autosave_block = False   # z. B. wenn beim Öffnen PDFs fehlten
+
+        # Datenordner + Einstellungen
+        self._data_dir = _data_dir()
+        self._lib_dir  = os.path.join(self._data_dir, 'planungen') if self._data_dir else None
+        self._settings = self._load_settings()
+        self.autosave_var = tk.BooleanVar(value=self._settings.get('autosave', True))
 
         # ── Tk-Variablen (einmalig angelegt, Traces nur einmal) ─
         self.lod_mode      = tk.StringVar(value='ohne')
@@ -1063,7 +1110,14 @@ class App(_AppBase):
                     self.report_callback_exception(*sys.exc_info())
         except queue.Empty:
             pass
-        self.after(40, self._poll_ui_queue)
+        self._poll_job = self.after(40, self._poll_ui_queue)
+
+    def destroy(self):
+        for job in (getattr(self, '_poll_job', None), getattr(self, '_autosave_job', None)):
+            if job:
+                try: self.after_cancel(job)
+                except tk.TclError: pass
+        super().destroy()
 
     # ══════════════════════════════════════════════════════════
     # Aufbau
@@ -1197,10 +1251,15 @@ class App(_AppBase):
         m = tk.Menu(self)
         f = tk.Menu(m, tearoff=0)
         f.add_command(label='Neue Planung', accelerator='Strg+N', command=self._new_planning)
-        f.add_command(label='Planung öffnen…', accelerator='Strg+O', command=self._load_planning)
+        f.add_command(label='Meine Planungen…', accelerator='Strg+O', command=self._show_library)
         f.add_command(label='Speichern', accelerator='Strg+S', command=self._save_planning)
-        f.add_command(label='Speichern unter…', accelerator='Strg+Umschalt+S',
+        f.add_command(label='Speichern unter neuem Namen…', accelerator='Strg+Umschalt+S',
                       command=lambda: self._save_planning(save_as=True))
+        f.add_checkbutton(label='Automatisch speichern', variable=self.autosave_var,
+                          command=self._on_autosave_toggle)
+        f.add_separator()
+        f.add_command(label='Planung aus Datei öffnen (.wz)…', command=self._open_planning_file)
+        f.add_command(label='Planung als Datei weitergeben (.wz)…', command=self._export_planning_file)
         f.add_separator()
         f.add_command(label='PDF-Dateien hinzufügen…', accelerator='Strg+D', command=self._add_files)
         f.add_command(label='Alle PDFs neu einlesen', command=self._run)
@@ -1217,6 +1276,7 @@ class App(_AppBase):
         v.add_separator()
         v.add_command(label='Übersicht', accelerator='Strg+1', command=lambda: self.nb.select(0))
         v.add_command(label='Optimierung', accelerator='Strg+2', command=lambda: self.nb.select(1))
+        v.add_command(label='Meine Planungen', accelerator='Strg+3', command=self._show_library)
         m.add_cascade(label='Ansicht', menu=v)
 
         h = tk.Menu(m, tearoff=0)
@@ -1227,7 +1287,7 @@ class App(_AppBase):
     def _bind_shortcuts(self):
         b = self.bind_all
         b('<Control-n>', lambda e: self._new_planning())
-        b('<Control-o>', lambda e: self._load_planning())
+        b('<Control-o>', lambda e: self._show_library())
         b('<Control-s>', lambda e: self._save_planning())
         b('<Control-S>', lambda e: self._save_planning(save_as=True))
         b('<Control-d>', lambda e: self._add_files())
@@ -1236,6 +1296,7 @@ class App(_AppBase):
                                     self._on_lod_toggle()))
         b('<Control-Key-1>', lambda e: self.nb.select(0))
         b('<Control-Key-2>', lambda e: self.nb.select(1))
+        b('<Control-Key-3>', lambda e: self._show_library())
         b('<F5>', lambda e: self._run_opt())
         b('<F1>', lambda e: self._show_help())
 
@@ -1301,7 +1362,8 @@ class App(_AppBase):
         pw.add(self.nb, weight=1)
         self._build_tab_overview()
         self._build_tab_opt()
-        self.nb.bind('<<NotebookTabChanged>>', lambda e: self._update_ui_state())
+        self._build_tab_library()
+        self.nb.bind('<<NotebookTabChanged>>', lambda e: self._update_ui_state(), add='+')
 
         if DND_FILES:
             self.drop_target_register(DND_FILES)
@@ -1435,7 +1497,10 @@ class App(_AppBase):
             (' oder ziehe sie einfach ins Fenster.' if DND_FILES else '.') +
             '\nSie werden automatisch eingelesen und hier als Tabelle angezeigt.',
             [('PDF-Dateien hinzufügen…', self._add_files, True),
-             ('Gespeicherte Planung öffnen…', self._load_planning, False)])
+             ('Meine Planungen', self._show_library, False)])
+        # „Weiter mit …“: zuletzt bearbeitete Planung (wird in _update_ui_state gesetzt)
+        self.ov_continue_btn = self._button(self.ov_empty._btns[0].master, '',
+                                            self._open_last_planning, primary=True)
 
     def _empty_state(self, parent, title, text, actions):
         f, inner = self._card(parent)
@@ -1650,19 +1715,42 @@ class App(_AppBase):
     def _mark_dirty(self, dirty=True):
         self._dirty = dirty
         self._update_title()
+        if dirty:
+            self._schedule_autosave()
+
+    def _in_library(self, path=None):
+        path = path or self._planning_path
+        if not path or not self._lib_dir:
+            return False
+        return (os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(path))))
+                == os.path.normcase(os.path.abspath(self._lib_dir)))
 
     def _update_title(self):
-        name = os.path.basename(self._planning_path) if self._planning_path else 'Neue Planung'
+        if self._plan_name:
+            name = self._plan_name
+        elif self._planning_path:
+            name = os.path.splitext(os.path.basename(self._planning_path))[0]
+        else:
+            name = 'Neue Planung'
         mark = ' •' if self._dirty else ''
         self.title(f'{APP_TITLE} — {name}{mark}')
-        self.plan_name_lbl.config(
-            text=name + ('  (ungespeichert)' if self._dirty else ''))
+        if not (self.results or self.files):
+            state = ''
+        elif self._in_library():
+            if self._dirty:
+                state = 'wird gespeichert …' if self.autosave_var.get() and not self._autosave_block \
+                        else 'ungespeichert – Strg+S'
+            else:
+                state = f'gespeichert {self._saved_at}' if self._saved_at else 'gespeichert'
+        else:
+            state = 'noch nicht gespeichert – Strg+S'
+        self.plan_name_lbl.config(text=name + (f'   ·   {state}' if state else ''))
 
     def _current_step(self):
         if not self.results:
             return 0
         if not self.opt_result:
-            return 1 if self.nb.index('current') == 0 else 2
+            return 2 if self.nb.index('current') == 1 else 1
         return 3
 
     def _goto_step(self, i):
@@ -1727,6 +1815,15 @@ class App(_AppBase):
             if not busy:
                 self.opt_status.set('')
 
+        # „Weiter mit …“ im Startbildschirm
+        last = self._settings.get('last_planning')
+        if not has_files and last and os.path.exists(last) and last != self._planning_path:
+            name = self._read_plan_name(last)
+            self.ov_continue_btn.config(text=f'Weiter mit „{name}“')
+            self.ov_continue_btn.pack(side='left', padx=5, before=self.ov_empty._btns[0])
+        else:
+            self.ov_continue_btn.pack_forget()
+
         if not self.status_var.get() and not busy:
             self._set_status('Bereit. PDF-Dateien hinzufügen, um zu beginnen.' if not has_files
                              else f'{len(self.results)} Labore geladen.')
@@ -1744,7 +1841,13 @@ class App(_AppBase):
             '   Rechts Proben, Referenzproben und Messtage eintragen.\n\n'
             '4. Exportieren\n'
             '   „PDF exportieren…“ (Strg+E) oder „Archivieren…“.\n\n'
-            'Speichern: Strg+S · Öffnen: Strg+O · Neu: Strg+N', parent=self)
+            'Planungen\n'
+            '   Strg+S speichert die Planung unter einem Namen in „Meine Planungen“.\n'
+            '   Danach wird jede Änderung automatisch gespeichert. Die PDFs werden\n'
+            '   in die Planung kopiert – sie funktioniert also auch, wenn die\n'
+            '   Original-PDFs verschoben werden.\n'
+            '   Reiter „Meine Planungen“ (Strg+O): öffnen, duplizieren, umbenennen, löschen.\n\n'
+            'Neu: Strg+N', parent=self)
 
     # ══════════════════════════════════════════════════════════
     # Dateien
@@ -2622,7 +2725,10 @@ class App(_AppBase):
                 'mode': self._opt_mode,
             }
         return {
-            'version':      3,
+            'version':      4,
+            'name':         self._plan_name,
+            'saved_at':     datetime.datetime.now().isoformat(timespec='seconds'),
+            'last_pdf_path': self._last_pdf_path,
             'files':        self.files,
             'masked':       list(self.masked),
             'masked_runs':     list(self.masked_runs),
@@ -2674,6 +2780,13 @@ class App(_AppBase):
         self.opt_probe_var.set(0)
         self.opt_ref_var.set(0)
         self.opt_messtage_var.set(1)
+        self._plan_name = None
+        self._last_pdf_path = None
+        self._saved_at = None
+        self._autosave_block = False
+        if self._autosave_job:
+            self.after_cancel(self._autosave_job)
+            self._autosave_job = None
 
         self.file_lb.delete(0, 'end')
         self.tree.delete(*self.tree.get_children())
@@ -2687,7 +2800,21 @@ class App(_AppBase):
         """Stellt App-Zustand aus dict wieder her (PDFs werden neu geparst)."""
         self._reset_state()
         self._planning_path = path
-        self.files       = list(d.get('files', []))
+        self._plan_name     = d.get('name') or (
+            os.path.basename(os.path.dirname(path)) if path and self._in_library(path)
+            else os.path.splitext(os.path.basename(path))[0] if path else None)
+        self._last_pdf_path = d.get('last_pdf_path')
+        # PDFs suchen: Originalpfad, sonst neben der Planung bzw. in deren pdfs-Ordner
+        files = []
+        for fp in d.get('files', []):
+            if not os.path.exists(fp) and path:
+                for cand in (os.path.join(os.path.dirname(path), 'pdfs', os.path.basename(fp)),
+                             os.path.join(os.path.dirname(path), os.path.basename(fp))):
+                    if os.path.exists(cand):
+                        fp = cand
+                        break
+            files.append(fp)
+        self.files       = files
         self.masked      = set(d.get('masked', []))
         self.masked_runs = set(d.get('masked_runs', []))
         self.forced_runs     = set(d.get('forced_runs', []))
@@ -2715,6 +2842,7 @@ class App(_AppBase):
                 '\n'.join(os.path.basename(p) for p in missing), parent=self)
 
         d['_missing'] = bool(missing)
+        self._autosave_block = bool(missing)   # nicht stillschweigend ohne die PDFs speichern
         self._mark_dirty(bool(missing))
         if self.files:
             self._parse_files(list(self.files), reset=True,
@@ -2764,17 +2892,23 @@ class App(_AppBase):
                 self.opt_hint.set(str(e))
 
         # Laden selbst ist keine Änderung (außer es fehlten Dateien)
+        if self._in_library():
+            self._saved_at = datetime.datetime.fromtimestamp(
+                os.path.getmtime(self._planning_path)).strftime('%d.%m. %H:%M')
+            self._remember_last(self._planning_path)
         self._mark_dirty(bool(d.get('_missing')))
-        self._set_status(f'Planung geladen · {len(self.results)} Labore.', 'ok')
+        self._set_status(f'Planung „{self._plan_name}“ geöffnet · {len(self.results)} Labore.', 'ok')
         self._update_ui_state()
 
     def _confirm_discard(self, action='fortfahren'):
-        """Fragt bei ungespeicherten Änderungen nach. True = weitermachen."""
+        """Vor dem Wechseln der Planung: sichern bzw. nachfragen. True = weitermachen."""
         if not self._dirty or not (self.results or self.files):
             return True
+        if self._in_library() and self.autosave_var.get() and not self._autosave_block:
+            return self._write_current(quiet=True)
         ans = messagebox.askyesnocancel('Ungespeicherte Änderungen',
-            f'Die aktuelle Planung hat ungespeicherte Änderungen.\n\n'
-            f'Vorher speichern?', parent=self)
+            'Die aktuelle Planung hat ungespeicherte Änderungen.\n\nVorher speichern?',
+            parent=self)
         if ans is None:
             return False
         if ans:
@@ -2785,43 +2919,214 @@ class App(_AppBase):
         if self._busy or not self._confirm_discard():
             return
         self._reset_state()
+        self._planning_path = None
         self._mark_dirty(False)
         self._set_status('Neue Planung. PDF-Dateien hinzufügen, um zu beginnen.')
         self.nb.select(0)
         self._update_ui_state()
 
-    def _save_planning(self, save_as=False):
-        import json
-        if not self.results:
-            self._set_status('Nichts zu speichern – zuerst PDFs laden.', 'warn')
-            return False
-        path = self._planning_path if not save_as else None
-        if not path:
-            path = filedialog.asksaveasfilename(
-                parent=self, defaultextension='.wz',
-                filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')],
-                initialfile=os.path.basename(self._planning_path or 'Planung.wz'))
-        if not path:
-            return False
+    # ── Einstellungen ─────────────────────────────────────────
+    def _settings_path(self):
+        return os.path.join(self._data_dir, 'einstellungen.json') if self._data_dir else None
+
+    def _load_settings(self):
+        p = self._settings_path()
         try:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(self._state_to_dict(), f, ensure_ascii=False, indent=2)
+            with open(p, encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_settings(self):
+        p = self._settings_path()
+        if p:
+            try:
+                _write_json_atomic(p, self._settings)
+            except OSError:
+                pass
+
+    def _remember_last(self, path):
+        self._settings['last_planning'] = path
+        self._save_settings()
+
+    def _on_autosave_toggle(self):
+        self._settings['autosave'] = bool(self.autosave_var.get())
+        self._save_settings()
+        self._update_title()
+        if self.autosave_var.get():
+            self._schedule_autosave()
+
+    # ── Automatisch speichern ─────────────────────────────────
+    def _schedule_autosave(self):
+        if not (self.autosave_var.get() and self._dirty and self._in_library()
+                and not self._autosave_block):
+            return
+        if self._autosave_job:
+            self.after_cancel(self._autosave_job)
+        self._autosave_job = self.after(1500, self._autosave)
+
+    def _autosave(self):
+        self._autosave_job = None
+        if self._busy:                       # während des Einlesens später nochmal
+            self._schedule_autosave()
+            return
+        if self._dirty and self.results and self._in_library():
+            self._write_current(quiet=True)
+
+    def _write_current(self, quiet=False):
+        """Aktuelle Planung an ihren bisherigen Ort schreiben."""
+        try:
+            _write_json_atomic(self._planning_path, self._state_to_dict())
         except Exception as e:
             messagebox.showerror('Speichern fehlgeschlagen', str(e), parent=self)
             return False
-        self._planning_path = path
+        self._saved_at = datetime.datetime.now().strftime('%H:%M')
+        self._autosave_block = False
         self._mark_dirty(False)
-        self._set_status(f'Gespeichert: {os.path.basename(path)}', 'ok')
+        if not quiet:
+            self._set_status(f'Gespeichert: {self._plan_name}', 'ok')
         return True
 
-    def _load_planning(self, path=None):
-        import json
-        if self._busy or not self._confirm_discard():
-            return
-        if path is None:
-            path = filedialog.askopenfilename(
-                parent=self, filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')])
+    # ── Speichern in „Meine Planungen“ ────────────────────────
+    def _suggest_name(self):
+        rv, product = self._last_export_meta[0], self._last_export_meta[1]
+        if not product:
+            products = [r.get('product') for r in self.results if r.get('product')]
+            product = max(set(products), key=products.count) if products else ''
+        parts = [f'RV {rv}' if rv else '', product,
+                 datetime.date.today().strftime('%d.%m.%Y')]
+        return ' '.join(p for p in parts if p).strip()
+
+    def _ask_plan_name(self, title, initial, exclude=None):
+        """Fragt einen Namen ab, der in „Meine Planungen“ noch frei ist."""
+        while True:
+            name = simpledialog.askstring(title, 'Name der Planung:', initialvalue=initial,
+                                          parent=self)
+            if name is None:
+                return None
+            name = name.strip()
+            if not name:
+                continue
+            folder = os.path.join(self._lib_dir, _safe_folder_name(name))
+            if os.path.exists(folder) and os.path.normcase(folder) != os.path.normcase(exclude or ''):
+                messagebox.showwarning('Name vergeben',
+                    f'Es gibt bereits eine Planung „{name}“.\nBitte einen anderen Namen wählen.',
+                    parent=self)
+                initial = name
+                continue
+            return name
+
+    def _copy_pdfs_into(self, folder):
+        """PDFs in den Ordner der Planung kopieren, damit sie nicht verloren gehen."""
+        pdf_dir = os.path.join(folder, 'pdfs')
+        os.makedirs(pdf_dir, exist_ok=True)
+        new_files = []
+        for src in self.files:
+            if os.path.normcase(os.path.dirname(os.path.abspath(src))) == os.path.normcase(pdf_dir):
+                new_files.append(src)
+                continue
+            base = os.path.basename(src)
+            dst = os.path.join(pdf_dir, base)
+            stem, ext = os.path.splitext(base)
+            n = 2
+            while os.path.exists(dst) and os.path.getsize(dst) != os.path.getsize(src):
+                dst = os.path.join(pdf_dir, f'{stem}_{n}{ext}')
+                n += 1
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+            if os.path.basename(dst) != base:
+                for r in self.results:
+                    if r.get('filename') == base:
+                        r['filename'] = os.path.basename(dst)
+                        break
+            new_files.append(dst)
+        self.files = new_files
+        self.file_lb.delete(0, 'end')
+        for fp in self.files:
+            self.file_lb.insert('end', os.path.basename(fp))
+
+    def _save_planning(self, save_as=False):
+        if not self.results:
+            self._set_status('Nichts zu speichern – zuerst PDFs laden.', 'warn')
+            return False
+        if self._in_library() and not save_as:
+            return self._write_current()
+        if not self._lib_dir:
+            return self._export_planning_file(make_current=True)
+
+        name = self._ask_plan_name('Planung speichern' if not save_as else 'Unter neuem Namen speichern',
+                                   self._suggest_name() if not save_as or not self._plan_name
+                                   else f'{self._plan_name} (Kopie)')
+        if not name:
+            return False
+        folder = os.path.join(self._lib_dir, _safe_folder_name(name))
+        try:
+            os.makedirs(folder, exist_ok=True)
+            self._copy_pdfs_into(folder)
+            self._plan_name = name
+            self._planning_path = os.path.join(folder, PLAN_FILE)
+            ok = self._write_current(quiet=True)
+        except Exception as e:
+            messagebox.showerror('Speichern fehlgeschlagen', str(e), parent=self)
+            return False
+        if ok:
+            self._remember_last(self._planning_path)
+            self._refresh_library()
+            msg = f'Planung „{name}“ gespeichert'
+            if self.autosave_var.get():
+                msg += ' – Änderungen werden ab jetzt automatisch gespeichert.'
+            self._toast(msg)
+        return ok
+
+    def _export_planning_file(self, make_current=False):
+        """Planung als einzelne .wz-Datei an beliebigen Ort speichern (z. B. zum Weitergeben)."""
+        if not self.results:
+            self._set_status('Nichts zu speichern – zuerst PDFs laden.', 'warn')
+            return False
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension='.wz',
+            filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')],
+            initialfile=_safe_folder_name(self._plan_name or self._suggest_name()) + '.wz')
         if not path:
+            return False
+        try:
+            _write_json_atomic(path, self._state_to_dict())
+        except Exception as e:
+            messagebox.showerror('Speichern fehlgeschlagen', str(e), parent=self)
+            return False
+        if make_current:
+            self._planning_path = path
+            self._mark_dirty(False)
+        self._set_status(f'Planung als Datei gespeichert: {os.path.basename(path)}', 'ok')
+        return True
+
+    def _read_plan_name(self, path):
+        try:
+            with open(path, encoding='utf-8') as f:
+                n = json.load(f).get('name')
+            if n:
+                return n
+        except Exception:
+            pass
+        return os.path.basename(os.path.dirname(path)) if self._in_library(path) \
+            else os.path.splitext(os.path.basename(path))[0]
+
+    def _open_last_planning(self):
+        last = self._settings.get('last_planning')
+        if last and os.path.exists(last):
+            self._load_planning(last)
+
+    def _open_planning_file(self):
+        path = filedialog.askopenfilename(
+            parent=self, filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')])
+        if path:
+            self._load_planning(path)
+
+    def _load_planning(self, path=None):
+        if path is None:
+            self._show_library()
+            return
+        if self._busy or not self._confirm_discard():
             return
         try:
             with open(path, encoding='utf-8') as f:
@@ -2830,7 +3135,265 @@ class App(_AppBase):
             messagebox.showerror('Öffnen fehlgeschlagen',
                 f'Die Datei konnte nicht gelesen werden:\n{e}', parent=self)
             return
+        self.nb.select(1 if d.get('opt_result') else 0)
         self._state_from_dict(d, path)
+        if not self._in_library(path):
+            self._set_status('Planung aus Datei geöffnet. Mit Strg+S in „Meine Planungen“ übernehmen.')
+
+    # ══════════════════════════════════════════════════════════
+    # Reiter „Meine Planungen“
+    # ══════════════════════════════════════════════════════════
+    def _build_tab_library(self):
+        tab = ttk.Frame(self.nb, padding=(0, 10, 0, 0))
+        self.nb.add(tab, text='  Meine Planungen  ')
+        self.lib_tab = tab
+        card, c = self._card(tab, 'Gespeicherte Planungen')
+        card.pack(fill='both', expand=True)
+
+        bar = tk.Frame(c, bg=KARTE)
+        bar.pack(fill='x', pady=(0,8))
+        self.lib_open_btn = self._button(bar, 'Öffnen', self._lib_open, primary=True)
+        self.lib_open_btn.pack(side='left')
+        self._button(bar, 'Neue Planung', self._new_planning, primary=False).pack(side='left', padx=(6,0))
+        self.lib_dup_btn = self._button(bar, 'Duplizieren', self._lib_duplicate, primary=False)
+        self.lib_dup_btn.pack(side='left', padx=(6,0))
+        Tooltip(self.lib_dup_btn, 'Kopie anlegen – z. B. als Vorlage für den nächsten Ringversuch')
+        self.lib_ren_btn = self._button(bar, 'Umbenennen', self._lib_rename, primary=False)
+        self.lib_ren_btn.pack(side='left', padx=(6,0))
+        self.lib_del_btn = self._button(bar, 'Löschen', self._lib_delete, primary=False)
+        self.lib_del_btn.pack(side='left', padx=(6,0))
+        self.lib_pdf_btn = self._button(bar, 'Letztes PDF öffnen', self._lib_open_pdf, primary=False)
+        self.lib_pdf_btn.pack(side='left', padx=(6,0))
+
+        self.lib_search = tk.StringVar()
+        self.lib_search.trace_add('write', lambda *_: self._refresh_library())
+        se = ttk.Entry(bar, textvariable=self.lib_search, width=24)
+        se.pack(side='right')
+        tk.Label(bar, text='Suchen:', font=FONT, bg=KARTE, fg=FG).pack(side='right', padx=(0,6))
+
+        tf = tk.Frame(c, bg=KARTE)
+        tf.pack(fill='both', expand=True)
+        cols = ('name', 'rv', 'produkt', 'labore', 'stand', 'pdf', 'geaendert')
+        t = ttk.Treeview(tf, columns=cols, show='headings', selectmode='browse')
+        vsb = ttk.Scrollbar(tf, orient='vertical', command=t.yview)
+        t.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        t.pack(fill='both', expand=True)
+        for col, text, w, anchor in [
+                ('name', 'Name', 320, 'w'), ('rv', 'RV', 80, 'w'), ('produkt', 'Produkt', 220, 'w'),
+                ('labore', 'Labore', 70, 'center'), ('stand', 'Stand', 120, 'w'),
+                ('pdf', 'Letzter PDF-Export', 200, 'w'), ('geaendert', 'Geändert', 130, 'w')]:
+            t.heading(col, text=text, anchor=anchor)
+            t.column(col, width=w, anchor=anchor, stretch=(col == 'name'))
+        t.tag_configure('current', background=AUSWAHL, font=FONT_SMB)
+        t.tag_configure('alt', background='#F7FAFE')
+        t.bind('<Double-1>', lambda e: self._lib_open())
+        t.bind('<Return>', lambda e: self._lib_open())
+        t.bind('<Delete>', lambda e: self._lib_delete())
+        t.bind('<<TreeviewSelect>>', lambda e: self._lib_update_buttons())
+        self.lib_tree = t
+
+        foot = tk.Frame(c, bg=KARTE)
+        foot.pack(fill='x', pady=(8,0))
+        self.lib_info = tk.Label(foot, text='', font=FONT_XS, fg=GRAY, bg=KARTE, anchor='w')
+        self.lib_info.pack(side='left')
+        lnk = tk.Label(foot, text='Ordner öffnen', font=FONT_XS, fg=ACCENT, bg=KARTE, cursor='hand2')
+        lnk.pack(side='right')
+        lnk.bind('<Button-1>', lambda e: self._lib_dir and _open_file(self._lib_dir))
+        self._check(foot, text='Automatisch speichern', variable=self.autosave_var,
+                    command=self._on_autosave_toggle).pack(side='right', padx=(0,16))
+
+        self.nb.bind('<<NotebookTabChanged>>',
+                     lambda e: self.nb.index('current') == 2 and self._refresh_library(), add='+')
+
+    def _show_library(self):
+        self.nb.select(2)
+        self._refresh_library()
+        self.lib_tree.focus_set()
+
+    def _library_entries(self):
+        entries = []
+        if not self._lib_dir or not os.path.isdir(self._lib_dir):
+            return entries
+        for folder in os.listdir(self._lib_dir):
+            path = os.path.join(self._lib_dir, folder, PLAN_FILE)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding='utf-8') as f:
+                    d = json.load(f)
+            except Exception:
+                d = {}
+            meta = d.get('last_export_meta') or ['', '', '']
+            prods = [m.get('product') for m in d.get('results_meta', []) if m.get('product')]
+            product = (meta[1] if len(meta) > 1 and meta[1] else
+                       max(set(prods), key=prods.count) if prods else '')
+            opt = d.get('opt_result')
+            stand = ('optimiert' if opt and opt.get('mode', 'opt') == 'opt' and opt.get('cov')
+                     else 'alle Labore' if opt else 'nur eingelesen')
+            pdf = d.get('last_pdf_path') or ''
+            entries.append({
+                'path': path, 'name': d.get('name') or folder, 'rv': meta[0] if meta else '',
+                'produkt': product, 'labore': len(d.get('results_meta', [])),
+                'stand': stand, 'pdf': os.path.basename(pdf) if pdf else '–', 'pdf_path': pdf,
+                'mtime': os.path.getmtime(path)})
+        entries.sort(key=lambda e: -e['mtime'])
+        return entries
+
+    def _refresh_library(self):
+        if not hasattr(self, 'lib_tree'):
+            return
+        t = self.lib_tree
+        sel = t.selection()
+        t.delete(*t.get_children())
+        q = self.lib_search.get().strip().lower()
+        self._lib_entries = {}
+        entries = self._library_entries()
+        shown = 0
+        for i, e in enumerate(entries):
+            if q and q not in ' '.join(str(e[k]) for k in ('name', 'rv', 'produkt')).lower():
+                continue
+            current = (self._planning_path and
+                       os.path.normcase(os.path.abspath(e['path'])) ==
+                       os.path.normcase(os.path.abspath(self._planning_path)))
+            iid = t.insert('', 'end', values=(
+                ('● ' if current else '') + e['name'], e['rv'], e['produkt'], e['labore'],
+                e['stand'], e['pdf'],
+                datetime.datetime.fromtimestamp(e['mtime']).strftime('%d.%m.%Y %H:%M')),
+                tags=('current',) if current else (('alt',) if shown % 2 else ()))
+            self._lib_entries[iid] = e
+            shown += 1
+        # Auswahl wiederherstellen bzw. erste Zeile wählen
+        keep = [i for i in sel if i in self._lib_entries]
+        if not keep and t.get_children():
+            keep = [t.get_children()[0]]
+        if keep:
+            t.selection_set(keep)
+            t.focus(keep[0])
+        if not entries:
+            self.lib_info.config(text='Noch keine Planungen gespeichert. Mit Strg+S wird die '
+                                      'aktuelle Planung hier abgelegt.')
+        else:
+            self.lib_info.config(text=f'{len(entries)} Planung(en) · gespeichert in {self._lib_dir}')
+        self._lib_update_buttons()
+
+    def _lib_selected(self):
+        sel = self.lib_tree.selection()
+        return self._lib_entries.get(sel[0]) if sel else None
+
+    def _lib_update_buttons(self):
+        e = self._lib_selected()
+        st = 'normal' if e else 'disabled'
+        for b in (self.lib_open_btn, self.lib_dup_btn, self.lib_ren_btn, self.lib_del_btn):
+            b.config(state=st)
+        self.lib_pdf_btn.config(state='normal' if e and e['pdf_path'] and
+                                os.path.exists(e['pdf_path']) else 'disabled')
+
+    def _lib_open(self):
+        e = self._lib_selected()
+        if e:
+            self._load_planning(e['path'])
+
+    def _lib_open_pdf(self):
+        e = self._lib_selected()
+        if e and e['pdf_path'] and os.path.exists(e['pdf_path']):
+            _open_file(e['pdf_path'])
+
+    def _is_current(self, e):
+        return bool(self._planning_path) and os.path.normcase(os.path.abspath(e['path'])) == \
+            os.path.normcase(os.path.abspath(self._planning_path))
+
+    def _lib_duplicate(self):
+        e = self._lib_selected()
+        if not e:
+            return
+        if self._is_current(e) and self._dirty:
+            self._write_current(quiet=True)
+        name = self._ask_plan_name('Planung duplizieren', f"{e['name']} (Kopie)")
+        if not name:
+            return
+        src = os.path.dirname(e['path'])
+        dst = os.path.join(self._lib_dir, _safe_folder_name(name))
+        try:
+            shutil.copytree(src, dst)
+            p = os.path.join(dst, PLAN_FILE)
+            with open(p, encoding='utf-8') as f:
+                d = json.load(f)
+            d['name'] = name
+            d['files'] = [os.path.join(dst, 'pdfs', os.path.basename(fp)) for fp in d.get('files', [])]
+            _write_json_atomic(p, d)
+        except Exception as ex:
+            messagebox.showerror('Duplizieren fehlgeschlagen', str(ex), parent=self)
+            return
+        self._refresh_library()
+        self._set_status(f'Kopie „{name}“ angelegt.', 'ok')
+
+    def _lib_rename(self):
+        e = self._lib_selected()
+        if not e:
+            return
+        src = os.path.dirname(e['path'])
+        name = self._ask_plan_name('Planung umbenennen', e['name'], exclude=src)
+        if not name or name == e['name']:
+            return
+        current = self._is_current(e)
+        if current and self._dirty:
+            self._write_current(quiet=True)
+        dst = os.path.join(self._lib_dir, _safe_folder_name(name))
+        try:
+            if os.path.normcase(dst) != os.path.normcase(src):
+                os.rename(src, dst)
+            p = os.path.join(dst, PLAN_FILE)
+            with open(p, encoding='utf-8') as f:
+                d = json.load(f)
+            d['name'] = name
+            d['files'] = [os.path.join(dst, 'pdfs', os.path.basename(fp))
+                          if os.path.normcase(os.path.abspath(fp)).startswith(os.path.normcase(src))
+                          else fp for fp in d.get('files', [])]
+            _write_json_atomic(p, d)
+        except Exception as ex:
+            messagebox.showerror('Umbenennen fehlgeschlagen',
+                f'{ex}\n\nIst eine Datei der Planung noch in einem anderen Programm geöffnet?',
+                parent=self)
+            return
+        if current:
+            self._planning_path = p
+            self._plan_name = name
+            self.files = d['files']
+            self._remember_last(p)
+            self._update_title()
+        self._refresh_library()
+        self._set_status(f'Umbenannt in „{name}“.', 'ok')
+
+    def _lib_delete(self):
+        e = self._lib_selected()
+        if not e:
+            return
+        if not messagebox.askyesno('Planung löschen',
+                f'Planung „{e["name"]}“ wirklich löschen?\n\n'
+                'Sie wird in den Ordner „daten/papierkorb“ verschoben und kann von dort '
+                'bei Bedarf zurückgeholt werden.', parent=self):
+            return
+        src = os.path.dirname(e['path'])
+        trash = os.path.join(self._data_dir, 'papierkorb')
+        try:
+            os.makedirs(trash, exist_ok=True)
+            stamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            shutil.move(src, os.path.join(trash, f'{os.path.basename(src)}_{stamp}'))
+        except Exception as ex:
+            messagebox.showerror('Löschen fehlgeschlagen', str(ex), parent=self)
+            return
+        if self._is_current(e):
+            self._dirty = False
+            self._reset_state()
+            self._planning_path = None
+            self._mark_dirty(False)
+            self._update_ui_state()
+        if self._settings.get('last_planning') == e['path']:
+            self._settings.pop('last_planning', None)
+            self._save_settings()
+        self._refresh_library()
+        self._set_status(f'Planung „{e["name"]}“ gelöscht (im Papierkorb-Ordner).', 'ok')
 
     def _choose_archive_dir(self):
         d = filedialog.askdirectory(parent=self, title='Archiv-Ordner wählen',
@@ -2886,10 +3449,10 @@ class App(_AppBase):
                             ref_lab_vars=self.opt_ref_lab_vars, comment=comment,
                             batches=self._get_batches(), rv=rv, product=product,
                             art_nrs=art_nrs)
-            self._planning_path = wz_path
-            with open(wz_path, 'w', encoding='utf-8') as f:
-                json.dump(self._state_to_dict(), f, ensure_ascii=False, indent=2)
-            self._mark_dirty(False)
+            _write_json_atomic(wz_path, self._state_to_dict())
+            self._last_pdf_path = pdf_path
+            if self._in_library():
+                self._write_current(quiet=True)
             self._toast(f'Archiviert: {os.path.basename(pdf_path)}', open_path=pdf_path)
         except Exception as e:
             messagebox.showerror('Archivieren fehlgeschlagen', str(e), parent=self)
@@ -3060,8 +3623,11 @@ class App(_AppBase):
             return
         rv, product, comment, art_nrs = meta
         n_proben, n_ref = self._export_counts()
+        last_dir = (os.path.dirname(self._last_pdf_path) if self._last_pdf_path
+                    else self._settings.get('last_pdf_dir'))
         path = filedialog.asksaveasfilename(parent=self, defaultextension='.pdf',
-            filetypes=[('PDF','*.pdf')], initialfile=self._default_stem(labs, rv, product) + '.pdf')
+            filetypes=[('PDF','*.pdf')], initialfile=self._default_stem(labs, rv, product) + '.pdf',
+            initialdir=last_dir if last_dir and os.path.isdir(last_dir) else None)
         if not path:
             return
         try:
@@ -3071,7 +3637,12 @@ class App(_AppBase):
                             ref_lab_vars=self.opt_ref_lab_vars, comment=comment,
                             batches=self._get_batches(), rv=rv, product=product,
                             art_nrs=art_nrs)
-            self._toast(f'PDF gespeichert: {os.path.basename(path)}', open_path=path)
+            self._last_pdf_path = path
+            self._settings['last_pdf_dir'] = os.path.dirname(path)
+            self._save_settings()
+            self._mark_dirty()
+            hint = '' if self._in_library() else '  –  Tipp: mit Strg+S die Planung selbst speichern'
+            self._toast(f'PDF gespeichert: {os.path.basename(path)}{hint}', open_path=path)
         except Exception as e:
             import traceback; traceback.print_exc()
             messagebox.showerror('Export fehlgeschlagen', str(e), parent=self)
@@ -3085,6 +3656,8 @@ class App(_AppBase):
                 return
         elif not self._confirm_discard():
             return
+        if self._autosave_job:
+            self.after_cancel(self._autosave_job)
         self.destroy()
 
     def _build_pdf(self, path, results, coverage, min_n, target_n,
