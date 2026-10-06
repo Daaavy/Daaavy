@@ -1,4 +1,4 @@
-# VERSION: 2026-05-12-LSD-FIX
+# VERSION: 2026-10-06-UX
 #!/usr/bin/env python3
 """
 Analyte Comparison Tool  –  medichem diagnostica
@@ -6,7 +6,7 @@ pip install pdfplumber reportlab
 python analyte_comparison.py
 """
 
-import os, sys, re, threading, itertools, datetime
+import os, sys, re, threading, itertools, datetime, queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
@@ -811,159 +811,536 @@ def optimize(results, min_n=3, target_n=5, max_n=6, masked_runs=None, forced_run
 # ─────────────────────────────────────────────────────────────
 # GUI
 # ─────────────────────────────────────────────────────────────
-BG, FG, GRAY, LIGHT, BORDER = '#ffffff', '#111111', '#888888', '#f2f2f2', '#e0e0e0'
-FONT     = ('Arial', 10)
-FONT_SM  = ('Arial', 9)
-FONT_XS  = ('Arial', 8)
-FONT_B   = ('Arial', 10, 'bold')
-FONT_SMB = ('Arial', 9, 'bold')
+BG, FG, GRAY, LIGHT, BORDER = '#ffffff', '#111111', '#6b6b6b', '#f2f2f2', '#e0e0e0'
+ACCENT    = '#1f5fbf'   # Akzentfarbe für aktive Schritte / Links
+OK_FG     = '#2d6a2d'
+WARN_FG   = '#9a6700'
+ERR_FG    = '#b42318'
+DISABLED  = '#b5b5b5'
+FONT      = ('Arial', 10)
+FONT_SM   = ('Arial', 9)
+FONT_XS   = ('Arial', 8)
+FONT_B    = ('Arial', 10, 'bold')
+FONT_SMB  = ('Arial', 9, 'bold')
+FONT_H    = ('Arial', 13, 'bold')
+
+APP_TITLE = 'Analyte Comparison'
+
 
 def fmt_eur(v):
     s = f'{v:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
     return s + ' EUR'
 
+
+def _safe_int(var, default=0):
+    """IntVar.get() wirft bei leerem/ungültigem Spinbox-Text — hier abfangen."""
+    try:
+        return int(var.get())
+    except (tk.TclError, ValueError, TypeError, AttributeError):
+        return default
+
+
+def _open_file(path):
+    """Datei mit dem Standardprogramm öffnen (Windows, macOS, Linux)."""
+    if sys.platform.startswith('win'):
+        os.startfile(path)
+    elif sys.platform == 'darwin':
+        import subprocess; subprocess.Popen(['open', path])
+    else:
+        import subprocess; subprocess.Popen(['xdg-open', path])
+
+
+class Tooltip:
+    """Kleiner Hinweistext beim Überfahren eines Widgets mit der Maus."""
+    def __init__(self, widget, text, delay=450):
+        self.widget, self.text, self.delay = widget, text, delay
+        self._after = None
+        self._tip = None
+        widget.bind('<Enter>', self._schedule, add='+')
+        widget.bind('<Leave>', self._hide, add='+')
+        widget.bind('<ButtonPress>', self._hide, add='+')
+
+    def _schedule(self, _=None):
+        self._cancel()
+        self._after = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after:
+            try: self.widget.after_cancel(self._after)
+            except tk.TclError: pass
+            self._after = None
+
+    def _show(self):
+        if self._tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        except tk.TclError:
+            return
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f'+{x}+{y}')
+        tk.Label(tw, text=self.text, font=FONT_XS, bg='#ffffe8', fg=FG,
+                 relief='solid', bd=1, padx=6, pady=3, justify='left',
+                 wraplength=320).pack()
+
+    def _hide(self, _=None):
+        self._cancel()
+        if self._tip:
+            try: self._tip.destroy()
+            except tk.TclError: pass
+            self._tip = None
+
+
+class ScrollFrame(tk.Frame):
+    """Vertikal scrollbarer Bereich. Mausrad wirkt nur, solange die Maus darüber ist."""
+    def __init__(self, parent, width=220, **kw):
+        bg = kw.pop('bg', BG)
+        super().__init__(parent, bg=bg)
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, width=width)
+        self.vsb = ttk.Scrollbar(self, orient='vertical', command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.vsb.pack(side='right', fill='y')
+        self.canvas.pack(side='left', fill='both', expand=True)
+        self.inner = tk.Frame(self.canvas, bg=bg, **kw)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor='nw')
+        self.inner.bind('<Configure>',
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind('<Configure>',
+            lambda e: self.canvas.itemconfig(self._win, width=e.width))
+        ScrollFrame._install(self)
+
+    @staticmethod
+    def _install(widget):
+        # Ein globaler Mausrad-Handler, der den ScrollFrame unter dem Mauszeiger scrollt
+        root = widget.winfo_toplevel()
+        if getattr(root, '_wheel_installed', False):
+            return
+        root._wheel_installed = True
+        for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            widget.bind_all(seq, ScrollFrame._dispatch, add='+')
+
+    @staticmethod
+    def _dispatch(e):
+        try:
+            w = e.widget.winfo_containing(e.x_root, e.y_root)
+        except (tk.TclError, AttributeError, KeyError):
+            return
+        while w is not None:
+            if isinstance(w, ttk.Treeview) or isinstance(w, tk.Listbox) or isinstance(w, tk.Text):
+                return  # haben eigenes Scrollverhalten
+            if isinstance(w, ScrollFrame):
+                w._on_wheel(e)
+                return
+            w = w.master
+
+    def _on_wheel(self, e):
+        # Nicht scrollen, wenn der Inhalt vollständig sichtbar ist
+        if self.canvas.yview() == (0.0, 1.0):
+            return
+        if getattr(e, 'num', None) == 4:
+            step = -1
+        elif getattr(e, 'num', None) == 5:
+            step = 1
+        else:
+            step = -1 if e.delta > 0 else 1
+        self.canvas.yview_scroll(step * 2, 'units')
+
+    def clear(self):
+        for w in self.inner.winfo_children():
+            w.destroy()
+        self.canvas.yview_moveto(0)
+
+
 class App(tk.Tk):
+    STEPS = ['PDFs laden', 'Übersicht prüfen', 'Optimieren', 'Exportieren']
+
     def __init__(self):
         super().__init__()
-        self.title('Analyte Comparison')
+        self.title(APP_TITLE)
         self.geometry('1400x900')
-        self.minsize(900, 600)
-        self.state('zoomed')  # Vollbild beim Start
+        self.minsize(1100, 650)
+        try:
+            self.state('zoomed')  # Vollbild beim Start (Windows)
+        except tk.TclError:
+            pass
         self.configure(bg=BG)
+
+        # ── Fachlicher Zustand ────────────────────────────────
         self.files      = []
         self.results    = []
-        self.masked     = set()   # masked labs
-        self.masked_runs     = set()  # masked runs für Probe: 'LAB-RUN'
-        self.forced_runs     = set()  # manually forced runs: 'LAB-RUN'
-        self.fixed_runs      = set()  # explicitly pinned via Fix-checkbox
-        self.ref_masked_runs = set()  # runs die für Referenz NICHT gemessen werden: 'LAB-RUN'
-        self.lab_measure_count = {}   # lab -> Anzahl Messungen (Multiplikator), default 1
-        self.lod_mode = tk.StringVar(value='ohne')  # 'ohne' oder 'mit' — LOD-Anzeige in Tabellen
-        self.opt_probe_var = None
-        self.opt_ref_var   = None
-        self.opt_probe_lbl = None
-        self._opt_total_cost = 0.0
-        self.opt_result = None
-        self._planning_path = None   # aktuell geöffnete .wz-Datei
-        self._archive_dir   = None   # Archiv-Ordner (persistent via settings)
+        self.masked     = set()        # deaktivierte Labore
+        self.masked_runs     = set()   # Runs, die für Proben NICHT gemessen werden: 'LAB-RUN'
+        self.forced_runs     = set()   # manuell erzwungene Runs: 'LAB-RUN'
+        self.fixed_runs      = set()   # explizit fixierte Runs (Fix-Häkchen)
+        self.ref_masked_runs = set()   # Runs, die für Referenz NICHT gemessen werden: 'LAB-RUN'
+        self.lab_measure_count = {}    # lab -> Anzahl Messungen (Multiplikator), default 1
+        self.opt_result = None         # (labs, cost, cov, min_n, target_n)
+        self._opt_mode  = None         # 'opt' oder 'all' (Alle Labore ohne Optimierung)
+        self._opt_stale = False        # Parameter seit letzter Optimierung geändert
+        self._planning_path = None     # aktuell geöffnete .wz-Datei
+        self._archive_dir   = None     # Archiv-Ordner
+        self._art_nrs       = {}       # lab -> Artikelnummer (SelectLine)
+        self._last_export_meta = ('', '', '', {})
+        self._dirty   = False          # ungespeicherte Änderungen
+        self._busy    = False          # PDFs werden gerade eingelesen
+
+        # ── Tk-Variablen (einmalig angelegt, Traces nur einmal) ─
+        self.lod_mode      = tk.StringVar(value='ohne')
+        self.lod_on_var    = tk.BooleanVar(value=False)
+        self.min_n_var     = tk.IntVar(value=3)
+        self.tgt_n_var     = tk.IntVar(value=5)
+        self.max_n_var     = tk.IntVar(value=6)
+        self.opt_probe_var    = tk.IntVar(value=0)
+        self.opt_ref_var      = tk.IntVar(value=0)
+        self.opt_messtage_var = tk.IntVar(value=1)
+        self.opt_ref_lab_vars = {}     # lab -> BooleanVar (Referenz an)
+        self.probe_batch_vars = {}     # idx -> StringVar
+        self.ref_batch_vars   = {}
+        self._lab_active_vars = {}     # lab -> BooleanVar (Sidebar)
+        self._lab_count_vars  = {}     # lab -> IntVar (Sidebar)
+
+        # Hintergrund-Threads dürfen Tk nicht direkt aufrufen → Warteschlange
+        self._ui_queue = queue.Queue()
+
         self._setup_styles()
+        self._build_menu()
         self._build()
 
+        for v in (self.min_n_var, self.tgt_n_var, self.max_n_var):
+            v.trace_add('write', lambda *_: self._on_params_changed())
+        for v in (self.opt_probe_var, self.opt_ref_var, self.opt_messtage_var):
+            v.trace_add('write', lambda *_: self._on_probe_changed())
+        self._poll_ui_queue()
+        self._bind_shortcuts()
+        self.protocol('WM_DELETE_WINDOW', self._on_close)
+        self._update_ui_state()
+
+    def _call_soon(self, fn, *args):
+        """Aus einem Hintergrund-Thread: fn(*args) im Haupt-Thread ausführen."""
+        self._ui_queue.put((fn, args))
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                try:
+                    fn(*args)
+                except Exception:
+                    self.report_callback_exception(*sys.exc_info())
+        except queue.Empty:
+            pass
+        self.after(40, self._poll_ui_queue)
+
+    # ══════════════════════════════════════════════════════════
+    # Aufbau
+    # ══════════════════════════════════════════════════════════
     def _setup_styles(self):
         s = ttk.Style(self)
         s.theme_use('clam')
-        s.configure('Treeview', background=BG, foreground=FG, rowheight=20,
+        s.configure('Treeview', background=BG, foreground=FG, rowheight=22,
                     fieldbackground=BG, font=FONT_SM)
-        s.configure('Treeview.Heading', background=LIGHT, foreground=GRAY,
-                    font=('Arial', 8), relief='flat', padding=(4,3))
-        s.map('Treeview', background=[('selected','#e8e8e8')],
+        s.configure('Treeview.Heading', background=LIGHT, foreground=FG,
+                    font=FONT_SMB, relief='flat', padding=(4,4))
+        s.map('Treeview', background=[('selected','#dfe9f8')],
                           foreground=[('selected',FG)])
-        s.configure('TNotebook', background='#f8f8f8', borderwidth=0)
-        s.configure('TNotebook.Tab', font=FONT_SM, padding=[14,5],
-                    background='#f0f0f0', foreground=GRAY)
+        s.configure('TNotebook', background=BG, borderwidth=0)
+        s.configure('TNotebook.Tab', font=FONT, padding=[18,6],
+                    background='#ececec', foreground=GRAY)
         s.map('TNotebook.Tab', background=[('selected',BG)],
                                foreground=[('selected',FG)])
-        s.configure('TProgressbar', background=FG, troughcolor=LIGHT)
+        s.configure('TProgressbar', background=ACCENT, troughcolor=LIGHT)
+        s.configure('Sash', sashthickness=6)
+        s.configure('TPanedwindow', background=BORDER)
+        # Ruhigere Optik für klassische Tk-Widgets
+        for cls in ('Checkbutton', 'Spinbox', 'Entry', 'Button'):
+            self.option_add(f'*{cls}.highlightThickness', 0)
+        self.option_add('*Checkbutton.borderWidth', 0)
+        self.option_add('*Spinbox.relief', 'solid')
+        self.option_add('*Spinbox.borderWidth', 1)
+
+    def _build_menu(self):
+        m = tk.Menu(self)
+        f = tk.Menu(m, tearoff=0)
+        f.add_command(label='Neue Planung', accelerator='Strg+N', command=self._new_planning)
+        f.add_command(label='Planung öffnen…', accelerator='Strg+O', command=self._load_planning)
+        f.add_command(label='Speichern', accelerator='Strg+S', command=self._save_planning)
+        f.add_command(label='Speichern unter…', accelerator='Strg+Umschalt+S',
+                      command=lambda: self._save_planning(save_as=True))
+        f.add_separator()
+        f.add_command(label='PDF-Dateien hinzufügen…', accelerator='Strg+D', command=self._add_files)
+        f.add_command(label='Alle PDFs neu einlesen', command=self._run)
+        f.add_separator()
+        f.add_command(label='Archivieren…', command=self._archive_planning)
+        f.add_command(label='Archiv-Ordner ändern…', command=self._choose_archive_dir)
+        f.add_separator()
+        f.add_command(label='Beenden', command=self._on_close)
+        m.add_cascade(label='Datei', menu=f)
+
+        v = tk.Menu(m, tearoff=0)
+        v.add_checkbutton(label='LOD-Werte statt Häkchen anzeigen', accelerator='Strg+L',
+                          variable=self.lod_on_var, command=self._on_lod_toggle)
+        v.add_separator()
+        v.add_command(label='Übersicht', accelerator='Strg+1', command=lambda: self.nb.select(0))
+        v.add_command(label='Optimierung', accelerator='Strg+2', command=lambda: self.nb.select(1))
+        m.add_cascade(label='Ansicht', menu=v)
+
+        h = tk.Menu(m, tearoff=0)
+        h.add_command(label='Kurzanleitung', accelerator='F1', command=self._show_help)
+        m.add_cascade(label='Hilfe', menu=h)
+        self.config(menu=m)
+
+    def _bind_shortcuts(self):
+        b = self.bind_all
+        b('<Control-n>', lambda e: self._new_planning())
+        b('<Control-o>', lambda e: self._load_planning())
+        b('<Control-s>', lambda e: self._save_planning())
+        b('<Control-S>', lambda e: self._save_planning(save_as=True))
+        b('<Control-d>', lambda e: self._add_files())
+        b('<Control-e>', lambda e: self._export_opt())
+        b('<Control-l>', lambda e: (self.lod_on_var.set(not self.lod_on_var.get()),
+                                    self._on_lod_toggle()))
+        b('<Control-Key-1>', lambda e: self.nb.select(0))
+        b('<Control-Key-2>', lambda e: self.nb.select(1))
+        b('<F5>', lambda e: self._run_opt())
+        b('<F1>', lambda e: self._show_help())
 
     def _build(self):
-        # ── Topbar: alles in einer Zeile ──────────────────────
-        topbar = tk.Frame(self, bg=BG, padx=16, pady=8)
-        topbar.pack(fill='x')
+        # ── Kopfzeile ─────────────────────────────────────────
+        top = tk.Frame(self, bg=BG, padx=16, pady=10)
+        top.pack(fill='x')
 
-        # Logo links
-        logo = tk.Frame(topbar, bg=BG)
+        logo = tk.Frame(top, bg=BG)
         logo.pack(side='left')
         tk.Label(logo, text='ANALYTE COMPARISON', font=('Arial',12,'bold'),
                  bg=BG, fg=FG).pack(anchor='w')
-        tk.Label(logo, text='medichem diagnostica', font=FONT_XS,
-                 bg=BG, fg=GRAY).pack(anchor='w')
+        self.plan_name_lbl = tk.Label(logo, text='Neue Planung', font=FONT_XS,
+                                      bg=BG, fg=GRAY)
+        self.plan_name_lbl.pack(anchor='w')
 
-        # Planung-Buttons links neben Logo
-        plan_row = tk.Frame(topbar, bg=BG)
-        plan_row.pack(side='left', padx=(16,0))
-        self._btn_small(plan_row, '💾 Speichern',   lambda: self._save_planning(),    primary=False).pack(side='left', padx=(0,4))
-        self._btn_small(plan_row, '📂 Laden',        lambda: self._load_planning(),    primary=False).pack(side='left', padx=(0,4))
-        self._btn_small(plan_row, '🗄 Archivieren',  lambda: self._archive_planning(), primary=False).pack(side='left', padx=(0,12))
-        self._btn_small(plan_row, '＋ Neue Planung', lambda: self._new_planning(),     primary=False).pack(side='left')
+        # Schrittanzeige: zeigt, wo man im Ablauf steht
+        steps = tk.Frame(top, bg=BG)
+        steps.pack(side='left', padx=(40,0))
+        self._step_lbls = []
+        for i, name in enumerate(self.STEPS):
+            if i:
+                tk.Label(steps, text='›', font=FONT, bg=BG, fg=DISABLED).pack(side='left', padx=6)
+            lbl = tk.Label(steps, text=f'{i+1}  {name}', font=FONT_SM, bg=BG,
+                           fg=DISABLED, cursor='hand2')
+            lbl.pack(side='left')
+            lbl.bind('<Button-1>', lambda e, i=i: self._goto_step(i))
+            self._step_lbls.append(lbl)
 
-        # Aktions-Buttons ganz rechts in Topbar
-        btn_row = tk.Frame(topbar, bg=BG)
-        btn_row.pack(side='right')
-        self.run_btn = self._btn_small(btn_row, 'Analysieren →', self._run, primary=True)
-        self.run_btn.pack(side='right', padx=(6,0))
-        lod_row = tk.Frame(btn_row, bg=BG)
-        lod_row.pack(side='right', padx=(6,0))
-        self.lod_btn_mit  = self._btn_small(lod_row, 'Mit LOD',  lambda: self._set_lod_mode('mit'),  primary=False)
-        self.lod_btn_mit.pack(side='left', padx=(2,0))
-        self.lod_btn_ohne = self._btn_small(lod_row, 'Ohne LOD', lambda: self._set_lod_mode('ohne'), primary=True)
-        self.lod_btn_ohne.pack(side='left')
-        self._btn_small(btn_row, 'Entfernen', self._remove_file, primary=False).pack(side='right', padx=(6,0))
-        self._btn_small(btn_row, '+ Dateien', self._add_files, primary=False).pack(side='right')
-
-        tk.Frame(self, bg=BORDER, height=1).pack(fill='x')
-
-        # ── Statuszeile ───────────────────────────────────────
-        sbar = tk.Frame(self, bg=LIGHT, padx=16, pady=3)
-        sbar.pack(fill='x')
-        self.status_var = tk.StringVar(value='Dateien hinzufügen und Analysieren klicken.')
-        tk.Label(sbar, textvariable=self.status_var, font=FONT_XS,
-                 fg=GRAY, bg=LIGHT).pack(side='left')
-        self.progress = ttk.Progressbar(sbar, length=120, mode='determinate')
-        self.progress.pack(side='right')
+        # Wichtigste Aktionen rechts
+        act = tk.Frame(top, bg=BG)
+        act.pack(side='right')
+        self.export_top_btn = self._button(act, 'PDF exportieren…', self._export_opt, primary=True)
+        self.export_top_btn.pack(side='right', padx=(6,0))
+        Tooltip(self.export_top_btn, 'Planung als PDF speichern (Strg+E)')
+        self.save_btn = self._button(act, 'Speichern', self._save_planning, primary=False)
+        self.save_btn.pack(side='right', padx=(6,0))
+        Tooltip(self.save_btn, 'Planung als .wz-Datei speichern (Strg+S)')
+        self.lod_chk = tk.Checkbutton(act, text='LOD-Werte anzeigen', variable=self.lod_on_var,
+                                      command=self._on_lod_toggle, font=FONT_SM, bg=BG,
+                                      activebackground=BG, cursor='hand2')
+        self.lod_chk.pack(side='right', padx=(6,12))
+        Tooltip(self.lod_chk, 'Statt ✓ wird die Nachweisgrenze (LOD) angezeigt.\n'
+                              '★ markiert den niedrigsten LOD je Analyt. (Strg+L)')
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill='x')
 
-        # ── Hauptbereich: Dateiliste rechts, Tabs links ───────
-        content = tk.Frame(self, bg=BG)
-        content.pack(fill='both', expand=True)
+        # ── Statusleiste (unten) ──────────────────────────────
+        sbar = tk.Frame(self, bg=LIGHT, padx=16, pady=4)
+        sbar.pack(side='bottom', fill='x')
+        self.status_var = tk.StringVar(value='')
+        self.status_lbl = tk.Label(sbar, textvariable=self.status_var, font=FONT_SM,
+                                   fg=FG, bg=LIGHT, anchor='w')
+        self.status_lbl.pack(side='left', fill='x', expand=True)
+        self.progress = ttk.Progressbar(sbar, length=160, mode='determinate')
+        tk.Frame(self, bg=BORDER, height=1).pack(side='bottom', fill='x')
 
-        # Dateiliste als feste rechte Spalte
-        tk.Frame(content, bg=BORDER, width=1).pack(side='right', fill='y', pady=8)
-        file_col = tk.Frame(content, bg=BG, width=260)
-        file_col.pack(side='right', fill='y', padx=(0,8), pady=8)
-        file_col.pack_propagate(False)
-        tk.Label(file_col, text='DATEIEN', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,4))
-        fl = tk.Frame(file_col, bg=BORDER, padx=1, pady=1)
-        fl.pack(fill='both', expand=True)
+        # ── Hauptbereich: Seitenleiste | Tabs ─────────────────
+        pw = ttk.PanedWindow(self, orient='horizontal')
+        pw.pack(fill='both', expand=True)
+        side = tk.Frame(pw, bg=BG, padx=12, pady=10)
+        self._build_sidebar(side)
+        pw.add(side, weight=0)
+
+        self.nb = ttk.Notebook(pw)
+        pw.add(self.nb, weight=1)
+        self._build_tab_overview()
+        self._build_tab_opt()
+        self.nb.bind('<<NotebookTabChanged>>', lambda e: self._update_ui_state())
+
+    def _button(self, parent, text, cmd, primary=True, small=False):
+        b = tk.Button(parent, text=text, command=cmd,
+            font=FONT_XS if small else FONT_SM,
+            bg=FG if primary else LIGHT, fg=BG if primary else FG,
+            relief='flat', padx=8 if small else 12, pady=2 if small else 5,
+            activebackground='#333' if primary else '#e2e2e2',
+            activeforeground=BG if primary else FG,
+            disabledforeground='#9a9a9a',
+            cursor='hand2', bd=0)
+        return b
+
+    def _section_title(self, parent, text, **pack):
+        lbl = tk.Label(parent, text=text, font=FONT_SMB, fg=GRAY, bg=parent['bg'])
+        lbl.pack(anchor='w', **({'pady': (0,4)} | pack))
+        return lbl
+
+    # ── Seitenleiste: Dateien + Labore ────────────────────────
+    def _build_sidebar(self, side):
+        side.configure(width=250)
+        hdr = tk.Frame(side, bg=BG)
+        hdr.pack(fill='x', pady=(0,4))
+        self.files_title = tk.Label(hdr, text='PDF-DATEIEN', font=FONT_SMB, fg=GRAY, bg=BG)
+        self.files_title.pack(side='left')
+
+        btns = tk.Frame(side, bg=BG)
+        btns.pack(fill='x', pady=(0,4))
+        add_b = self._button(btns, '+ Hinzufügen…', self._add_files, primary=True, small=True)
+        add_b.pack(side='left')
+        Tooltip(add_b, 'Ringversuchs-PDFs auswählen (Strg+D).\nSie werden sofort eingelesen.')
+        self.remove_btn = self._button(btns, 'Entfernen', self._remove_file, primary=False, small=True)
+        self.remove_btn.pack(side='left', padx=(4,0))
+        Tooltip(self.remove_btn, 'Markierte Datei(en) entfernen (Entf)')
+
+        fl = tk.Frame(side, bg=BORDER, padx=1, pady=1)
+        fl.pack(fill='x')
         fi = tk.Frame(fl, bg=BG)
         fi.pack(fill='both', expand=True)
-        sb_y = tk.Scrollbar(fi, orient='vertical')
-        self.file_lb = tk.Listbox(fi, yscrollcommand=sb_y.set, font=FONT_SM,
-            bg=BG, fg=FG, selectbackground='#e8e8e8', relief='flat',
-            bd=0, activestyle='none')
+        sb_y = ttk.Scrollbar(fi, orient='vertical')
+        self.file_lb = tk.Listbox(fi, yscrollcommand=sb_y.set, font=FONT_SM, height=8,
+            bg=BG, fg=FG, selectbackground='#dfe9f8', selectforeground=FG,
+            relief='flat', bd=0, activestyle='none', selectmode='extended',
+            highlightthickness=0, width=28)
         sb_y.config(command=self.file_lb.yview)
         sb_y.pack(side='right', fill='y')
         self.file_lb.pack(side='left', fill='both', expand=True, padx=4, pady=2)
+        self.file_lb.bind('<Delete>', lambda e: self._remove_file())
+        self.file_lb.bind('<BackSpace>', lambda e: self._remove_file())
+        self.file_lb.bind('<<ListboxSelect>>', lambda e: self._update_ui_state())
 
-        # Notebook
-        self.nb = ttk.Notebook(content)
-        self.nb.pack(fill='both', expand=True)
-        self._build_tab_overview()
-        self._build_tab_opt()
+        # Labore
+        lh = tk.Frame(side, bg=BG)
+        lh.pack(fill='x', pady=(16,2))
+        tk.Label(lh, text='LABORE', font=FONT_SMB, fg=GRAY, bg=BG).pack(side='left')
+        msr = tk.Label(lh, text='Messungen', font=FONT_XS, fg=GRAY, bg=BG)
+        msr.pack(side='right')
+        Tooltip(msr, 'Wie oft das Labor misst.\nZählt entsprechend mehrfach in der Abdeckung (n).')
+        tk.Label(side, text='Häkchen entfernen = Labor nicht berücksichtigen',
+                 font=FONT_XS, fg=GRAY, bg=BG, anchor='w', justify='left',
+                 wraplength=220).pack(anchor='w', pady=(0,4))
+        self.lab_list = ScrollFrame(side, width=190)
+        self.lab_list.pack(fill='both', expand=True)
 
-    def _btn_small(self, parent, text, cmd, primary=True):
-        return tk.Button(parent, text=text, command=cmd, font=FONT_SM,
-            bg=FG if primary else BG, fg=BG if primary else FG,
-            relief='flat', padx=10, pady=4,
-            activebackground='#333' if primary else LIGHT,
-            activeforeground=BG if primary else FG,
-            cursor='hand2', bd=0)
+    def _refresh_lab_list(self):
+        self.lab_list.clear()
+        inner = self.lab_list.inner
+        if not self.results:
+            tk.Label(inner, text='Noch keine Labore –\nzuerst PDFs hinzufügen.',
+                     font=FONT_SM, fg=GRAY, bg=BG, justify='left').pack(anchor='w', pady=4)
+            return
+        for r in self.results:
+            lab = r['lab']
+            row = tk.Frame(inner, bg=BG)
+            row.pack(fill='x', pady=1)
+            av = tk.BooleanVar(value=lab not in self.masked)
+            self._lab_active_vars[lab] = av
+            has_data = bool(r.get('analytes'))
+            cb = tk.Checkbutton(row, text=lab, variable=av, font=FONT_SM, bg=BG,
+                                activebackground=BG, anchor='w', cursor='hand2',
+                                fg=FG if has_data else ERR_FG,
+                                command=lambda l=lab: self._toggle_mask(l))
+            cb.pack(side='left', fill='x', expand=True)
+            tip = r.get('filename', '')
+            if r.get('product'):
+                tip += f"\nProdukt: {r['product']}"
+            tip += f"\n{len(r.get('analytes', []))} Analyten, {len(r.get('runs', {}))} Runs"
+            if not has_data:
+                tip += '\n⚠ Keine Analyten erkannt – PDF prüfen.'
+            Tooltip(cb, tip)
+            cv = tk.IntVar(value=self.lab_measure_count.get(lab, 1))
+            self._lab_count_vars[lab] = cv
+            sp = tk.Spinbox(row, from_=1, to=20, width=3, textvariable=cv, font=FONT_SM,
+                            justify='right', command=lambda l=lab: self._on_count_spin(l))
+            sp.pack(side='right')
+            sp.bind('<FocusOut>', lambda e, l=lab: self._on_count_spin(l))
+            sp.bind('<Return>',   lambda e, l=lab: self._on_count_spin(l))
 
-    def _btn(self, parent, text, cmd, primary=True):
-        b = self._btn_small(parent, text, cmd, primary)
-        b.pack(fill='x', pady=2)
-        return b
+    def _on_count_spin(self, lab):
+        var = self._lab_count_vars.get(lab)
+        n = max(1, _safe_int(var, 1)) if var else 1
+        self._set_lab_measure_count(lab, n)
+
+    # ── Tab 1: Übersicht ──────────────────────────────────────
+    def _build_tab_overview(self):
+        tab = tk.Frame(self.nb, bg=BG)
+        self.nb.add(tab, text='Übersicht')
+        self.ov_stack = tk.Frame(tab, bg=BG)
+        self.ov_stack.pack(fill='both', expand=True, padx=8, pady=8)
+
+        # Tabelle
+        self.ov_table_frame = tk.Frame(self.ov_stack, bg=BG)
+        tf = tk.Frame(self.ov_table_frame, bg=BG)
+        tf.pack(fill='both', expand=True)
+        self.tree = self._tree(tf)
+        self.tree.bind('<Button-3>', lambda e: self._heading_menu(self.tree, e))
+        self._legend(self.ov_table_frame, [
+            ('✓', 'Labor misst den Analyten'),
+            ('○', 'nur in einem deaktivierten Labor'),
+            ('2✓', 'Labor misst mehrfach'),
+            ('n', 'Anzahl Messungen gesamt'),
+        ], hint='Rechtsklick auf einen Laborkopf: Labor ein-/ausblenden, Messungen setzen')
+
+        # Leerer Zustand: erklärt, was zu tun ist
+        self.ov_empty = self._empty_state(self.ov_stack,
+            'Noch keine Daten',
+            'Füge die Ringversuchs-PDFs der Labore hinzu.\n'
+            'Sie werden automatisch eingelesen und hier als Tabelle angezeigt.',
+            [('PDF-Dateien hinzufügen…', self._add_files, True),
+             ('Gespeicherte Planung öffnen…', self._load_planning, False)])
+
+    def _empty_state(self, parent, title, text, actions):
+        f = tk.Frame(parent, bg=BG)
+        box = tk.Frame(f, bg=BG)
+        box.place(relx=0.5, rely=0.4, anchor='center')
+        tk.Label(box, text=title, font=FONT_H, bg=BG, fg=FG).pack(pady=(0,6))
+        lbl = tk.Label(box, text=text, font=FONT, bg=BG, fg=GRAY, justify='center')
+        lbl.pack(pady=(0,16))
+        row = tk.Frame(box, bg=BG)
+        row.pack()
+        f._btns = []
+        for label, cmd, primary in actions:
+            b = self._button(row, label, cmd, primary=primary)
+            b.pack(side='left', padx=4)
+            f._btns.append(b)
+        f._text_lbl = lbl
+        return f
+
+    def _legend(self, parent, items, hint=''):
+        leg = tk.Frame(parent, bg=BG)
+        leg.pack(fill='x', pady=(6,0))
+        for sym, txt in items:
+            if sym.startswith('#'):
+                tk.Label(leg, text='   ', bg=sym, relief='solid', bd=1).pack(side='left', padx=(0,4))
+            else:
+                tk.Label(leg, text=sym, font=FONT_SMB, bg=BG, fg=FG).pack(side='left', padx=(0,4))
+            tk.Label(leg, text=txt, font=FONT_XS, bg=BG, fg=GRAY).pack(side='left', padx=(0,14))
+        if hint:
+            tk.Label(leg, text=hint, font=FONT_XS, bg=BG, fg=GRAY).pack(side='right')
+        return leg
 
     def _tree(self, parent):
-        t = ttk.Treeview(parent, show='headings', selectmode='none')
+        t = ttk.Treeview(parent, show='headings', selectmode='browse')
         vsb = ttk.Scrollbar(parent, orient='vertical', command=t.yview)
         hsb = ttk.Scrollbar(parent, orient='horizontal', command=t.xview)
         t.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         hsb.pack(side='bottom', fill='x')
         vsb.pack(side='right', fill='y')
         t.pack(fill='both', expand=True)
-        t.tag_configure('group',    background='#f4f4f4', font=FONT_SMB)
+        t.tag_configure('group',    background='#e9e9e9', font=FONT_SMB)
         t.tag_configure('alt',      background='#fafafa')
         t.tag_configure('normal',   background=BG)
         t.tag_configure('inactive', background='#f0f0f0', foreground='#aaaaaa')
@@ -972,332 +1349,434 @@ class App(tk.Tk):
         t.tag_configure('low',      background='#fdecea')
         return t
 
-    # ── Tab 1: Übersicht ──────────────────────────────────────
-    def _build_tab_overview(self):
-        tab = tk.Frame(self.nb, bg=BG)
-        self.nb.add(tab, text='  Übersicht  ')
-
-        # Hauptbereich: Tabelle + rechtes Panel
-        main = tk.Frame(tab, bg=BG)
-        main.pack(fill='both', expand=True)
-
-        # Tabelle nimmt fast alles
-        tf = tk.Frame(main, bg=BG)
-        tf.pack(side='left', fill='both', expand=True, padx=(8,0), pady=8)
-        self.tree = self._tree(tf)
-        self.tree.bind('<Button-3>', self._overview_rightclick)
-
-        # Probe-Rechner Vars (nur im Opt-Tab genutzt, hier als Stubs)
-        self.n_proben_var = tk.IntVar(value=0)
-        self.n_ref_var    = tk.IntVar(value=0)
-        self.ref_lab_vars = {}
-        self.probe_lbl    = None
-        self.ref_check_frame = tk.Frame(self, bg=BG)  # unsichtbarer Stub
-        self.export_btn = tk.Button(self, state='disabled')  # Stub, nie sichtbar
-
-    def _build_probe_rechner(self):
-        pass  # Probenrechner nur im Opt-Tab
-
-    def _update_probe(self):
-        try:
-            n  = int(self.n_proben_var.get())
-            nr = int(self.n_ref_var.get())
-        except:
-            return
-        active = [r for r in self.results if r['lab'] not in self.masked]
-        if not active or (n == 0 and nr == 0):
-            if self.probe_lbl: self.probe_lbl.config(text='')
-            return
-
-        # Kosten Probe: alle aktiven Labore
-        cost_probe = sum(r.get('cost') or 0 for r in active)
-        # Kosten Referenz: nur Labore mit gesetzter Checkbox
-        cost_ref = sum(
-            r.get('cost') or 0 for r in active
-            if self.ref_lab_vars.get(r['lab'], tk.BooleanVar(value=True)).get()
-        )
-
-        if cost_probe == 0 and cost_ref == 0:
-            if self.probe_lbl: self.probe_lbl.config(text='')
-            return
-
-        lines = []
-        if n:
-            lines.append(f'Einfachbestimmung Probe:   {fmt_eur(cost_probe*n)}')
-            lines.append(f'Doppelbestimmung Probe:    {fmt_eur(cost_probe*2*n)}')
-        if nr:
-            lines.append(f'Doppelbestimmung Referenz: {fmt_eur(cost_ref*2*nr)}')
-        if n and nr:
-            lines.append(f'\u2211 Einfach:  {fmt_eur(cost_probe*n + cost_ref*nr)}')
-            lines.append(f'\u2211 Doppelt:  {fmt_eur(cost_probe*2*n + cost_ref*2*nr)}')
-        if self.probe_lbl: self.probe_lbl.config(text='\n'.join(lines))
-
     # ── Tab 2: Optimierung ────────────────────────────────────
     def _build_tab_opt(self):
         tab = tk.Frame(self.nb, bg=BG)
-        self.nb.add(tab, text='  Optimierung  ')
+        self.nb.add(tab, text='Optimierung')
 
         # Kontrollleiste
         ctrl = tk.Frame(tab, bg=LIGHT, padx=12, pady=8)
         ctrl.pack(fill='x')
 
-        def lbl(t): return tk.Label(ctrl, text=t, font=FONT_SM, bg=LIGHT, fg=FG)
-        def spin(var): return tk.Spinbox(ctrl, from_=1, to=20, width=4, textvariable=var, font=FONT_SM)
+        def spin(label, var, tip):
+            box = tk.Frame(ctrl, bg=LIGHT)
+            box.pack(side='left', padx=(0,14))
+            l = tk.Label(box, text=label, font=FONT_SM, bg=LIGHT, fg=FG)
+            l.pack(side='left', padx=(0,4))
+            s = tk.Spinbox(box, from_=1, to=20, width=3, textvariable=var, font=FONT_SM,
+                           justify='right')
+            s.pack(side='left')
+            Tooltip(l, tip); Tooltip(s, tip)
 
-        lbl('Min. Abdeckung (n ≥)').pack(side='left', padx=(0,4))
-        self.min_n_var = tk.IntVar(value=3)
-        spin(self.min_n_var).pack(side='left', padx=(0,14))
+        tk.Label(ctrl, text='Abdeckung je Analyt:', font=FONT_SMB, bg=LIGHT,
+                 fg=FG).pack(side='left', padx=(0,10))
+        spin('mindestens', self.min_n_var,
+             'Jeder Analyt soll von mindestens so vielen Laboren gemessen werden.\n'
+             'Analyten darunter werden rot markiert.')
+        spin('Ziel', self.tgt_n_var,
+             'Angestrebte Anzahl Messungen je Analyt (grün markiert).')
+        spin('höchstens', self.max_n_var,
+             'Über dieser Anzahl werden keine weiteren Runs für einen Analyten hinzugefügt.')
 
-        lbl('Ziel-Abdeckung (n ≥)').pack(side='left', padx=(0,4))
-        self.tgt_n_var = tk.IntVar(value=5)
-        spin(self.tgt_n_var).pack(side='left', padx=(0,14))
+        self.opt_btn = self._button(ctrl, 'Optimieren  (F5)', self._run_opt, primary=True)
+        self.opt_btn.pack(side='left', padx=(4,6))
+        Tooltip(self.opt_btn, 'Günstigste Kombination von Laboren und Runs berechnen,\n'
+                              'die die gewünschte Abdeckung erreicht.')
+        self.all_btn = self._button(ctrl, 'Alle Labore übernehmen', self._show_all_labs_overview,
+                                    primary=False)
+        self.all_btn.pack(side='left')
+        Tooltip(self.all_btn, 'Ohne Optimierung: alle aktiven Labore mit allen Runs einplanen.')
 
-        lbl('Max. Abdeckung (n ≤)').pack(side='left', padx=(0,4))
-        self.max_n_var = tk.IntVar(value=6)
-        spin(self.max_n_var).pack(side='left', padx=(0,14))
+        self.opt_preview_btn = self._button(ctrl, 'Vorschau', self._preview_opt, primary=False)
+        self.opt_preview_btn.pack(side='right')
+        Tooltip(self.opt_preview_btn, 'PDF-Vorschau öffnen (ohne zu speichern)')
 
-        self.opt_btn = tk.Button(ctrl, text='Optimieren →', command=self._run_opt,
-            font=FONT_SM, bg=FG, fg=BG, relief='flat', padx=12, pady=4,
-            cursor='hand2', bd=0)
-        self.opt_btn.pack(side='left', padx=(0,8))
-
-        self.opt_export_btn = tk.Button(ctrl, text='Export PDF', command=self._export_opt,
-            font=FONT_SM, bg=BG, fg=FG, relief='flat', padx=12, pady=4,
-            cursor='hand2', bd=0, state='disabled')
-        self.opt_export_btn.pack(side='left', padx=(0,4))
-
-        self.opt_preview_btn = tk.Button(ctrl, text='Vorschau',
-            command=self._preview_opt,
-            font=FONT_SM, bg=LIGHT, fg=FG, relief='flat', padx=10, pady=4,
-            cursor='hand2', bd=0, state='disabled')
-        self.opt_preview_btn.pack(side='left', padx=(0,14))
-
-        self.opt_status = tk.StringVar(value='PDFs laden → Analysieren → Optimieren klicken.')
-        tk.Label(ctrl, textvariable=self.opt_status, font=FONT_XS,
-                 fg=GRAY, bg=LIGHT).pack(side='left')
-
+        # Ergebniszeile
+        res = tk.Frame(tab, bg=BG, padx=12, pady=6)
+        res.pack(fill='x')
+        self.opt_status = tk.StringVar(value='')
+        self.opt_status_lbl = tk.Label(res, textvariable=self.opt_status, font=FONT_B,
+                                       fg=FG, bg=BG, anchor='w')
+        self.opt_status_lbl.pack(side='left')
+        self.opt_hint = tk.StringVar(value='')
+        self.opt_hint_lbl = tk.Label(res, textvariable=self.opt_hint, font=FONT_SM,
+                                     fg=WARN_FG, bg=BG, anchor='w')
+        self.opt_hint_lbl.pack(side='left', padx=(14,0))
         tk.Frame(tab, bg=BORDER, height=1).pack(fill='x')
 
-        # Body
-        body = tk.Frame(tab, bg=BG)
-        body.pack(fill='both', expand=True)
+        self.opt_stack = tk.Frame(tab, bg=BG)
+        self.opt_stack.pack(fill='both', expand=True)
 
-        # Verfügbare Labore — eigene Spalte ganz links
-        mask_col = tk.Frame(body, bg=BG, width=130, padx=8, pady=10)
-        mask_col.pack(side='left', fill='y')
-        mask_col.pack_propagate(False)
-        tk.Label(mask_col, text='VERFÜGBARE\nLABORE', font=FONT_XS,
-                 fg=GRAY, bg=BG, justify='left').pack(anchor='w', pady=(0,4))
-        self.mask_frame = tk.Frame(mask_col, bg=BG)
-        self.mask_frame.pack(fill='x')
-        tk.Frame(body, bg=BORDER, width=1).pack(side='left', fill='y', pady=8)
+        self.opt_empty = self._empty_state(self.opt_stack,
+            'Noch nicht optimiert',
+            'Lege oben die gewünschte Abdeckung fest und klicke auf „Optimieren“.\n'
+            'Danach kannst du einzelne Runs an- und abwählen – die Kosten aktualisieren sich sofort.',
+            [('Optimieren', self._run_opt, True),
+             ('Alle Labore übernehmen', self._show_all_labs_overview, False)])
 
-        # Linkes Panel: scrollbar
-        left_outer = tk.Frame(body, bg=BG, width=300)
-        left_outer.pack(side='left', fill='y')
-        left_outer.pack_propagate(False)
+        # Body: Runs | Tabelle | Kosten & Proben (Breiten per Maus verstellbar)
+        self.opt_body = ttk.PanedWindow(self.opt_stack, orient='horizontal')
 
-        left_canvas = tk.Canvas(left_outer, bg=BG, highlightthickness=0, width=290)
-        left_sb = ttk.Scrollbar(left_outer, orient='vertical', command=left_canvas.yview)
-        left_canvas.configure(yscrollcommand=left_sb.set)
-        left_sb.pack(side='right', fill='y')
-        left_canvas.pack(side='left', fill='both', expand=True)
-
-        left = tk.Frame(left_canvas, bg=BG, padx=12, pady=10)
-        left_canvas.create_window((0,0), window=left, anchor='nw')
-
-        def _on_left_configure(e):
-            left_canvas.configure(scrollregion=left_canvas.bbox('all'))
-        left.bind('<Configure>', _on_left_configure)
-
-        def _on_mousewheel(e):
-            left_canvas.yview_scroll(int(-1*(e.delta/120)), 'units')
-        left_canvas.bind_all('<MouseWheel>', _on_mousewheel)
-
-        tk.Label(left, text='OPTIMALE AUSWAHL', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,4))
-        self.opt_lab_frame = tk.Frame(left, bg=BG)
-        self.opt_lab_frame.pack(fill='x')
-
-        # Ganz rechts: Chargen-Spalte
-        tk.Frame(body, bg=BORDER, width=1).pack(side='right', fill='y', pady=8)
-        chargen_col = tk.Frame(body, bg=BG, width=180, padx=8, pady=10)
-        chargen_col.pack(side='right', fill='y')
-        chargen_col.pack_propagate(False)
-        tk.Label(chargen_col, text='CHARGEN', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,4))
-        # Zusammenfassung fest oben in Chargen-Spalte
-        self.opt_probe_lbl = tk.Label(chargen_col, text='', font=FONT_SM,
-                                      fg=FG, bg=BG, anchor='w', justify='left',
-                                      wraplength=160)
-        self.opt_probe_lbl.pack(anchor='w', fill='x')
-        tk.Frame(chargen_col, bg=BORDER, height=1).pack(fill='x', pady=(6,4))
-        self._batch_container_outer = tk.Frame(chargen_col, bg=BG)
-        self._batch_container_outer.pack(fill='both', expand=True)
-
-        tk.Frame(body, bg=BORDER, width=1).pack(side='right', fill='y', pady=8)
-
-        # Kosten + Probenrechner (mittlere rechte Spalte)
-        cost_right = tk.Frame(body, bg=BG, width=250, padx=10, pady=10)
-        cost_right.pack(side='right', fill='y')
-        cost_right.pack_propagate(False)
-
-        # Trennlinie links von Tabelle
-        tk.Frame(body, bg=BORDER, width=1).pack(side='left', fill='y', pady=8)
+        # Links: Auswahl je Labor
+        left = tk.Frame(self.opt_body, bg=BG, padx=10, pady=10)
+        self._section_title(left, 'AUSWAHL JE LABOR')
+        lh = tk.Frame(left, bg=BG)
+        lh.pack(fill='x', padx=(0,18))
+        for txt, w, tip in [
+                ('Probe', 5, 'Run wird für die Proben gemessen'),
+                ('Ref', 4, 'Run wird auch für die Referenzproben gemessen'),
+                ('Run / Kosten', 0, 'Klick auf den Namen schaltet Probe und Ref zusammen'),
+                ('Fix', 3, 'Run beim erneuten Optimieren immer behalten')]:
+            l = tk.Label(lh, text=txt, font=FONT_XS, fg=GRAY, bg=BG, width=w or None,
+                         anchor='w' if not w else 'center')
+            l.pack(side='right' if txt == 'Fix' else 'left',
+                   fill='x' if not w else None, expand=not w)
+            Tooltip(l, tip)
+        tk.Frame(left, bg=BORDER, height=1).pack(fill='x', pady=(2,0))
+        self.opt_lab_scroll = ScrollFrame(left, width=300)
+        self.opt_lab_scroll.pack(fill='both', expand=True)
+        self.opt_lab_frame = self.opt_lab_scroll.inner
+        self.opt_body.add(left, weight=0)
 
         # Mitte: Abdeckungstabelle
-        right = tk.Frame(body, bg=BG, padx=8, pady=10)
-        right.pack(side='left', fill='both', expand=True)
-
-        # Toolbar
-        tbar = tk.Frame(right, bg=BG)
-        tbar.pack(fill='x', pady=(0,4))
-        tk.Label(tbar, text='ABDECKUNG', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(side='left')
-        tk.Button(tbar, text='Alle Labore anzeigen',
-                  font=FONT_XS, bg=LIGHT, fg=FG, relief='flat',
-                  padx=8, pady=2, cursor='hand2', bd=0,
-                  command=self._show_all_labs_overview).pack(side='right')
-
-        tf = tk.Frame(right, bg=BG)
+        mid = tk.Frame(self.opt_body, bg=BG, padx=8, pady=10)
+        self._section_title(mid, 'ABDECKUNG')
+        tf = tk.Frame(mid, bg=BG)
         tf.pack(fill='both', expand=True)
         self.opt_tree = self._tree(tf)
         self.opt_tree.bind('<Button-3>', self._opt_rightclick)
+        self._legend(mid, [
+            ('#e8f5e9', 'Ziel erreicht'),
+            ('#fff9e6', 'Minimum erreicht'),
+            ('#fdecea', 'unter Minimum'),
+            ('(A)', 'gewählte Runs'),
+            ('[B]', 'weitere Runs, nicht gewählt'),
+        ], hint='Rechtsklick: Labor/Run ein- oder ausblenden')
+        self.opt_body.add(mid, weight=1)
 
-        tk.Label(cost_right, text='KOSTEN PRO PROBE', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,6))
-        self.opt_cost_frame_container = tk.Frame(cost_right, bg=BG)
+        # Rechts: Kosten, Probenrechner, Chargen
+        right = tk.Frame(self.opt_body, bg=BG, pady=10)
+        self.opt_right = ScrollFrame(right, width=275, padx=10)
+        self.opt_right.pack(fill='both', expand=True)
+        r = self.opt_right.inner
+
+        self._section_title(r, 'KOSTEN PRO PROBE')
+        self.opt_cost_frame_container = tk.Frame(r, bg=BG)
         self.opt_cost_frame_container.pack(fill='x')
         self.opt_cost_frame = tk.Frame(self.opt_cost_frame_container, bg=BG)
         self.opt_cost_frame.pack(fill='x')
 
-        tk.Frame(cost_right, bg=BORDER, height=1).pack(fill='x', pady=(12,10))
-        tk.Label(cost_right, text='PROBENRECHNER', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,6))
+        tk.Frame(r, bg=BORDER, height=1).pack(fill='x', pady=(12,10))
+        self._section_title(r, 'PROBENRECHNER')
+        for label, var, lo, tip in [
+                ('Proben', self.opt_probe_var, 0, 'Anzahl Proben pro Messtag'),
+                ('Referenzproben', self.opt_ref_var, 0, 'Anzahl Referenzproben pro Messtag'),
+                ('Messtage', self.opt_messtage_var, 1, 'Alle Mengen werden mit den Messtagen multipliziert')]:
+            row = tk.Frame(r, bg=BG)
+            row.pack(fill='x', pady=2)
+            l = tk.Label(row, text=label, font=FONT_SM, fg=FG, bg=BG, anchor='w')
+            l.pack(side='left', fill='x', expand=True)
+            sb = tk.Spinbox(row, from_=lo, to=9999, width=6, textvariable=var,
+                            font=FONT_SM, justify='right')
+            sb.pack(side='right')
+            Tooltip(l, tip)
 
-        # Scrollbarer Bereich für Spinboxen + Checkboxen
-        self.opt_probe_outer = tk.Frame(cost_right, bg=BG)
-        self.opt_probe_outer.pack(fill='x', anchor='n')
+        self.opt_ref_frame = tk.Frame(r, bg=BG)
+        self.opt_ref_frame.pack(fill='x')
+
+        tk.Frame(r, bg=BORDER, height=1).pack(fill='x', pady=(10,8))
+        self._section_title(r, 'GESAMTKOSTEN')
+        self.opt_probe_lbl = tk.Label(r, text='', font=FONT_SM, fg=FG, bg=BG,
+                                      anchor='w', justify='left')
+        self.opt_probe_lbl.pack(anchor='w', fill='x')
+
+        tk.Frame(r, bg=BORDER, height=1).pack(fill='x', pady=(10,8))
+        self._section_title(r, 'CHARGEN')
+        self._batch_container = tk.Frame(r, bg=BG)
+        self._batch_container.pack(fill='x')
+        self.opt_body.add(right, weight=0)
+
+        tk.Frame(tab, bg=BORDER, height=1).pack(fill='x')
+        foot = tk.Frame(tab, bg=BG, padx=12, pady=8)
+        foot.pack(fill='x')
+        self.opt_export_btn = self._button(foot, 'PDF exportieren…', self._export_opt, primary=True)
+        self.opt_export_btn.pack(side='right')
+        self.opt_archive_btn = self._button(foot, 'Archivieren…', self._archive_planning, primary=False)
+        self.opt_archive_btn.pack(side='right', padx=(0,6))
+        Tooltip(self.opt_archive_btn, 'PDF und Planung (.wz) gemeinsam im Archiv-Ordner ablegen')
+
+    # ══════════════════════════════════════════════════════════
+    # Zustand der Oberfläche
+    # ══════════════════════════════════════════════════════════
+    def _set_status(self, text, kind='info'):
+        self.status_var.set(text)
+        self.status_lbl.config(fg={'info': FG, 'ok': OK_FG, 'warn': WARN_FG,
+                                   'error': ERR_FG}.get(kind, FG))
+
+    def _mark_dirty(self, dirty=True):
+        self._dirty = dirty
+        self._update_title()
+
+    def _update_title(self):
+        name = os.path.basename(self._planning_path) if self._planning_path else 'Neue Planung'
+        mark = ' •' if self._dirty else ''
+        self.title(f'{APP_TITLE} — {name}{mark}')
+        self.plan_name_lbl.config(
+            text=name + ('  (ungespeichert)' if self._dirty else ''))
+
+    def _current_step(self):
+        if not self.results:
+            return 0
+        if not self.opt_result:
+            return 1 if self.nb.index('current') == 0 else 2
+        return 3
+
+    def _goto_step(self, i):
+        if i == 0:
+            self._add_files()
+        elif i == 1:
+            self.nb.select(0)
+        elif i == 2:
+            self.nb.select(1)
+        elif i == 3:
+            self._export_opt()
+
+    def _update_ui_state(self):
+        has_files   = bool(self.files)
+        has_results = bool(self.results)
+        has_opt     = self.opt_result is not None
+        busy        = self._busy
+
+        # Schrittanzeige
+        cur = self._current_step()
+        for i, lbl in enumerate(self._step_lbls):
+            if i < cur:
+                lbl.config(fg=OK_FG, font=FONT_SM, text=f'✓  {self.STEPS[i]}')
+            elif i == cur:
+                lbl.config(fg=ACCENT, font=FONT_SMB, text=f'{i+1}  {self.STEPS[i]}')
+            else:
+                lbl.config(fg=DISABLED, font=FONT_SM, text=f'{i+1}  {self.STEPS[i]}')
+
+        self.files_title.config(text=f'PDF-DATEIEN ({len(self.files)})' if has_files else 'PDF-DATEIEN')
+        self.remove_btn.config(state='normal' if self.file_lb.curselection() and not busy else 'disabled')
+
+        exp = 'normal' if has_opt and not busy else 'disabled'
+        for b in (self.export_top_btn, self.opt_export_btn, self.opt_preview_btn, self.opt_archive_btn):
+            b.config(state=exp)
+        self.save_btn.config(state='normal' if has_results and not busy else 'disabled')
+        run_state = 'normal' if has_results and not busy else 'disabled'
+        self.opt_btn.config(state=run_state)
+        self.all_btn.config(state=run_state)
+        for b in self.opt_empty._btns:
+            b.config(state=run_state)
+
+        # Übersicht: Tabelle oder Leerzustand
+        if has_results:
+            self.ov_empty.pack_forget()
+            self.ov_table_frame.pack(fill='both', expand=True)
+        else:
+            self.ov_table_frame.pack_forget()
+            self.ov_empty.pack(fill='both', expand=True)
+
+        # Optimierung: Ergebnis oder Leerzustand
+        if has_opt:
+            self.opt_empty.pack_forget()
+            self.opt_body.pack(fill='both', expand=True)
+        else:
+            self.opt_body.pack_forget()
+            self.opt_empty.pack(fill='both', expand=True)
+            self.opt_empty._text_lbl.config(text=(
+                'Lege oben die gewünschte Abdeckung fest und klicke auf „Optimieren“.\n'
+                'Danach kannst du einzelne Runs an- und abwählen – die Kosten aktualisieren sich sofort.'
+                if has_results else
+                'Zuerst PDF-Dateien hinzufügen (links). Danach kann hier optimiert werden.'))
+            if not busy:
+                self.opt_status.set('')
+
+        if not self.status_var.get() and not busy:
+            self._set_status('Bereit. PDF-Dateien hinzufügen, um zu beginnen.' if not has_files
+                             else f'{len(self.results)} Labore geladen.')
+
+    def _show_help(self):
+        messagebox.showinfo('Kurzanleitung',
+            '1. PDFs laden\n'
+            '   Links auf „+ Hinzufügen…“ klicken. Die PDFs werden sofort eingelesen.\n\n'
+            '2. Übersicht prüfen\n'
+            '   Die Tabelle zeigt, welches Labor welchen Analyten misst.\n'
+            '   Links können Labore abgewählt und Mehrfachmessungen eingestellt werden.\n\n'
+            '3. Optimieren\n'
+            '   Gewünschte Abdeckung einstellen und „Optimieren“ klicken (F5).\n'
+            '   Runs links per Häkchen an-/abwählen: Probe, Ref (Referenz), Fix.\n'
+            '   Rechts Proben, Referenzproben und Messtage eintragen.\n\n'
+            '4. Exportieren\n'
+            '   „PDF exportieren…“ (Strg+E) oder „Archivieren…“.\n\n'
+            'Speichern: Strg+S · Öffnen: Strg+O · Neu: Strg+N', parent=self)
+
+    # ══════════════════════════════════════════════════════════
+    # Dateien
+    # ══════════════════════════════════════════════════════════
     def _add_files(self):
+        if self._busy:
+            return
         paths = filedialog.askopenfilenames(
-            title='PDF-Dateien auswählen',
-            filetypes=[('PDF','*.pdf')])
-        for p in paths:
-            if p not in self.files:
-                self.files.append(p)
-                self.file_lb.insert('end', os.path.basename(p))
-        if paths:
-            self.status_var.set(f'{len(self.files)} Datei(en) bereit.')
+            parent=self, title='PDF-Dateien auswählen', filetypes=[('PDF','*.pdf')])
+        new = [p for p in paths if p not in self.files]
+        dup = len(paths) - len(new)
+        for p in new:
+            self.files.append(p)
+            self.file_lb.insert('end', os.path.basename(p))
+        if new:
+            self._mark_dirty()
+            self._parse_files(new, reset=False)
+        elif dup:
+            self._set_status(f'{dup} Datei(en) waren bereits in der Liste.', 'warn')
 
     def _remove_file(self):
-        sel = self.file_lb.curselection()
-        if not sel: return
-        idx = sel[0]
-        self.file_lb.delete(idx)
-        self.files.pop(idx)
-        self.status_var.set(f'{len(self.files)} Datei(en) bereit.')
+        if self._busy:
+            return
+        sel = sorted(self.file_lb.curselection(), reverse=True)
+        if not sel:
+            return
+        removed = []
+        for idx in sel:
+            self.file_lb.delete(idx)
+            removed.append(os.path.basename(self.files.pop(idx)))
+        before = len(self.results)
+        self.results = [r for r in self.results if r.get('filename') not in removed]
+        known = {r['lab'] for r in self.results}
+        self.masked &= known
+        self._mark_dirty()
+        if len(self.results) != before:
+            self._after_results_changed()
+        self._set_status(f'{len(removed)} Datei(en) entfernt.')
+        self._update_ui_state()
 
     def _run(self):
+        """Alle Dateien neu einlesen."""
         if not self.files:
-            messagebox.showwarning('Keine Dateien', 'Bitte erst PDF-Dateien hinzufügen.')
+            self._set_status('Keine Dateien vorhanden – bitte zuerst PDFs hinzufügen.', 'warn')
             return
-        self.run_btn.config(state='disabled')
-        self.results = []
-        self.masked  = set()
-        self.progress['maximum'] = len(self.files)
+        self._parse_files(list(self.files), reset=True)
+
+    def _parse_files(self, paths, reset, on_done=None):
+        if self._busy:
+            return
+        self._busy = True
+        if reset:
+            self.results = []
+        self.progress.pack(side='right', before=self.status_lbl)
+        self.progress['maximum'] = len(paths)
         self.progress['value']   = 0
-        threading.Thread(target=self._worker, daemon=True).start()
+        self.config(cursor='watch')
+        self._update_ui_state()
 
-    def _worker(self):
-        errors = []
-        for i, path in enumerate(self.files):
-            self.status_var.set(f'Lese {i+1}/{len(self.files)}: {os.path.basename(path)}…')
-            try:
-                r = parse_pdf(path)
-                self.results.append(r)
-            except Exception as e:
-                errors.append(f'{os.path.basename(path)}: {e}')
-                self.results.append({'lab': os.path.basename(path)[:15],
-                                     'analytes': [], 'cost': None,
-                                     'filename': os.path.basename(path)})
-            self.progress['value'] = i + 1
-        self.after(0, self._on_done, errors)
+        def worker():
+            parsed, errors = [], []
+            for i, path in enumerate(paths):
+                name = os.path.basename(path)
+                self._call_soon(self._set_status, f'Lese {i+1}/{len(paths)}: {name} …')
+                try:
+                    parsed.append(parse_pdf(path))
+                except Exception as e:
+                    errors.append(f'{name}: {e}')
+                    parsed.append({'lab': name[:15], 'analytes': [], 'cost': None,
+                                   'runs': {}, 'filename': name})
+                self._call_soon(self.progress.configure, {'value': i+1})
+            self._call_soon(self._on_parsed, parsed, errors, on_done)
 
-    def _on_done(self, errors):
-        n_ok = sum(1 for r in self.results if r['analytes'])
-        self.status_var.set(f'{len(self.results)} verarbeitet, {n_ok} mit Daten.')
-        self.run_btn.config(state='normal')
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_parsed(self, parsed, errors, on_done=None):
+        self._busy = False
+        self.config(cursor='')
+        self.progress.pack_forget()
+        self.results.extend(parsed)
+        # Reihenfolge wie in der Dateiliste
+        order = {os.path.basename(p): i for i, p in enumerate(self.files)}
+        self.results.sort(key=lambda r: order.get(r.get('filename'), 999))
+        known = {r['lab'] for r in self.results}
+        self.masked &= known
+
+        empty = [r['filename'] for r in parsed if not r.get('analytes')]
         if errors:
-            messagebox.showerror('Fehler', '\n'.join(errors))
-        self._refresh_overview()
-        self._refresh_mask_panel()
-        self.export_btn.config(state='normal' if self.results else 'disabled')
+            self._set_status(f'{len(errors)} Datei(en) konnten nicht gelesen werden.', 'error')
+            self.after_idle(lambda: messagebox.showerror('Fehler beim Einlesen',
+                'Folgende Dateien konnten nicht gelesen werden:\n\n' + '\n'.join(errors),
+                parent=self))
+        elif empty:
+            self._set_status(f'{len(parsed)} Datei(en) eingelesen – in {len(empty)} wurden '
+                             f'keine Analyten erkannt: {", ".join(empty)}', 'warn')
+        else:
+            self._set_status(f'{len(parsed)} Datei(en) eingelesen · '
+                             f'{len(self.results)} Labore insgesamt.', 'ok')
+        if on_done:
+            on_done()
+        else:
+            self._after_results_changed()
+        self._update_ui_state()
 
-    # ── Übersicht rendern ─────────────────────────────────────
+    def _after_results_changed(self):
+        """Nach Änderung der Laborliste: alle Ansichten aktualisieren."""
+        self._refresh_lab_list()
+        self._refresh_overview()
+        if self.opt_result is not None:
+            # Bestehendes Ergebnis mit neuer Laborliste neu berechnen
+            self._opt_stale = True
+            self._rerun_opt_after_mask()
+
+    # ══════════════════════════════════════════════════════════
+    # Übersicht
+    # ══════════════════════════════════════════════════════════
     def _active(self):
         return [r for r in self.results if r['lab'] not in self.masked]
 
     def _refresh_overview(self):
-        active = self._active()
-        self._render_table(self.tree, active, show_all_analytes=True)
-        self._render_costs(active) if hasattr(self, 'cost_frame') else None
-        self._rebuild_ref_checks(active)
-        self._update_probe()
+        self._render_table(self.tree, self._active(), show_all_analytes=True)
 
-    def _rebuild_ref_checks(self, active):
-        """Checkboxen: welche Labore bekommen Referenzproben."""
-        for w in self.ref_check_frame.winfo_children():
-            w.destroy()
-        if not active: return
-        tk.Label(self.ref_check_frame, text='Referenz an:',
-                 font=FONT_XS, fg=GRAY, bg=BG).pack(anchor='w')
-        for r in active:
-            lab = r['lab']
-            if lab not in self.ref_lab_vars:
-                self.ref_lab_vars[lab] = tk.BooleanVar(value=True)
-            var = self.ref_lab_vars[lab]
-            cb = tk.Checkbutton(self.ref_check_frame, text=lab,
-                                variable=var, font=FONT_SM,
-                                bg=BG, fg=FG, activebackground=BG,
-                                command=self._update_probe)
-            cb.pack(anchor='w', pady=1)
+    def _refresh_opt_table(self):
+        if self.opt_result:
+            labs, cost, cov, min_n, target_n = self.opt_result
+            self._render_table(self.opt_tree, labs,
+                               coverage=cov,
+                               min_n=min_n, target_n=target_n, show_all_analytes=True)
 
     def _render_table(self, tree, results, coverage=None,
                       min_n=None, target_n=None, show_all_analytes=False):
-        # Vollständiger Reset — verhindert dass alte Spalten steckenbleiben
-        tree.delete(*tree.get_children())
+        # Scrollposition merken, damit die Tabelle beim Umschalten nicht springt
         try:
-            tree['columns'] = []
-        except Exception:
-            pass
-        self.update()
-        if not results: return
+            ypos = tree.yview()[0]
+            xpos = tree.xview()[0]
+        except tk.TclError:
+            ypos = xpos = 0
+        tree.delete(*tree.get_children())
+        tree['columns'] = []
+        if not self.results:
+            return
 
-        labs = [r['lab'] for r in results]
-        # Alle bekannten Analyten — inkl. nicht-validierter (all_analytes)
-        # Analyt-Liste immer aus allen bekannten PDFs (self.results) aufbauen
         all_a = sorted(
             {a for r in self.results
              for a in r.get('all_analytes', r['analytes'])},
             key=sort_key)
 
-        # Spalten = alle geladenen Labore (optimierte + nicht-optimierte)
+        # Spalten = alle geladenen Labore (gewählte + nicht gewählte)
         all_results_for_cols = list(self.results)
         labs_cols = [r['lab'] for r in all_results_for_cols]
 
         cols = ['Analyt'] + labs_cols + ['n']
         tree['columns'] = cols
-        tree.heading('Analyt', text='Analyt')
+        tree.heading('Analyt', text='Analyt', anchor='w')
         tree.column('Analyt', width=200, minwidth=120, stretch=False)
+        opt_labs_set = {r['lab'] for r in results}
         for lab in labs_cols:
-            tree.heading(lab, text=lab)
-            w = max(70, min(len(lab)*9, 160))
+            mcount = self.lab_measure_count.get(lab, 1)
+            head = lab + (f' ×{mcount}' if mcount != 1 else '')
+            if lab in self.masked:
+                head = '(' + head + ')'
+            tree.heading(lab, text=head)
+            w = max(70, min(len(head)*9, 160)) if coverage is None else max(90, min(len(head)*9, 170))
             tree.column(lab, width=w, minwidth=50, stretch=False, anchor='center')
         tree.heading('n', text='n')
-        tree.column('n', width=36, minwidth=36, stretch=False, anchor='e')
-
-        # Optimierte Labs als Set für schnelle Prüfung
-        opt_labs_set = {r['lab'] for r in results}
+        tree.column('n', width=40, minwidth=36, stretch=False, anchor='center')
 
         lod_on = self.lod_mode.get() == 'mit'
         _lod_lookup = {}
@@ -1321,14 +1800,13 @@ class App(tk.Tk):
             for r in all_results_for_cols:
                 lab = r['lab']
                 in_opt = lab in opt_labs_set
-                # Für optimierte Labs: sel_runs aus opt_result
                 if in_opt:
                     r_opt = next((x for x in results if x['lab'] == lab), r)
                     runs = r_opt.get('runs', r.get('runs', {}))
                     sel_runs = r_opt.get('selected_runs', list(runs.keys()))
                 else:
                     runs = r.get('runs', {})
-                    sel_runs = []  # nicht optimiert → keine aktiven Runs
+                    sel_runs = []  # nicht gewählt → keine aktiven Runs
                 orig = next((x for x in self.results if x['lab'] == lab), r)
                 all_runs_lab = list(orig.get('runs', runs).keys())
 
@@ -1337,7 +1815,6 @@ class App(tk.Tk):
                 _lv = _lod_lookup.get(lab, {}).get(analyte.lower()) if lod_on else None
 
                 if runs:
-                    # Aktive (gewählte) Runs mit diesem Analyten
                     active_runs = []
                     for rl in sel_runs:
                         key = f"{lab}-{rl}"
@@ -1346,7 +1823,6 @@ class App(tk.Tk):
                                    for a in runs.get(rl, {}).get('analytes', [])):
                                 active_runs.append(rl)
 
-                    # Nicht gewählte Runs mit diesem Analyten
                     inactive_runs = []
                     for rl in all_runs_lab:
                         if rl in sel_runs: continue
@@ -1364,22 +1840,24 @@ class App(tk.Tk):
                         else:
                             cell = base
                     elif inactive_runs:
-                        # Vorhanden aber nicht gewählt — grau, zählt NICHT
-                        cell = '○ (' + ','.join(inactive_runs) + ')' if coverage is not None else '○'
-                        # has bleibt False → zählt nicht im n-Counter und nicht im Export
+                        # Vorhanden aber nicht gewählt — zählt NICHT
+                        cell = '○ [' + ','.join(inactive_runs) + ']' if coverage is not None else '○'
                     else:
                         cell = ''
                 else:
-                    has = any(a.lower() == analyte.lower() for a in r['analytes'])
+                    has = in_opt and any(a.lower() == analyte.lower() for a in r['analytes'])
+                    present = any(a.lower() == analyte.lower() for a in r['analytes'])
                     if has:
                         cell = (f'{_lv:g}' if _lv is not None else '✓') if lod_on else (mprefix + '✓')
+                    elif present:
+                        cell = '○'
                     else:
                         cell = ''
                 if lod_on and has and _lv is not None:
                     _row_lod.append((len(vals), _lv))
                 vals.append(cell)
                 if has: count += mcount
-            vals.append(str(count) if count else '')
+            vals.append(str(count) if count else '–')
 
             if lod_on and _row_lod:
                 _min_v = min(v for _, v in _row_lod)
@@ -1387,219 +1865,182 @@ class App(tk.Tk):
                     if _v == _min_v:
                         vals[_idx] = '★' + vals[_idx]
 
-            # Prüfen ob nur inaktive Treffer (~ Einträge) vorhanden
-            only_inactive = (count == 0 and any(
-                '✓' in v for v in vals[1:-1]
-            ))
-
             if coverage is not None:
                 c = count
                 tag = 'ok5' if c >= target_n else 'ok3' if c >= min_n else 'low'
             else:
-                if only_inactive:
+                if count == 0:
                     tag = 'inactive'
                 else:
                     tag = 'alt' if row_idx % 2 == 0 else 'normal'
             tree.insert('', 'end', values=vals, tags=(tag,))
             row_idx += 1
 
-    def _render_costs(self, active):
-        # Komplett neu aufbauen statt nur Widgets löschen
-        self.cost_frame.destroy()
-        self.cost_frame = tk.Frame(self.cost_container, bg=BG)
-        self.cost_frame.pack(fill='x')
-        if not active: return
+        tree.yview_moveto(ypos)
+        tree.xview_moveto(xpos)
 
-        PAD = 10
-        headers = ['Labor', '1 Analyse', '1 Probe', 'Doppelbestimmung']
-        for col, h in enumerate(headers):
-            anchor = 'w' if col == 0 else 'e'
-            tk.Label(self.cost_frame, text=h, font=FONT_XS, fg=GRAY, bg=BG,
-                     anchor=anchor).grid(row=0, column=col,
-                     padx=(0,PAD) if col<3 else 0, pady=(0,2),
-                     sticky='e' if col else 'w')
-        tk.Frame(self.cost_frame, bg=BORDER, height=1).grid(
-            row=1, column=0, columnspan=4, sticky='ew', pady=(0,2))
-
-        total = 0.0
-        for i, r in enumerate(active):
-            c = r.get('cost')
-            row = i + 2
-            tk.Label(self.cost_frame, text=r['lab'], font=FONT_SM,
-                     fg=FG, bg=BG, anchor='w').grid(row=row, column=0,
-                     padx=(0,PAD), pady=0, sticky='w')
-            if c is not None:
-                for col, val in [(1,c),(2,c),(3,c*2)]:
-                    tk.Label(self.cost_frame, text=fmt_eur(val), font=FONT_SM,
-                             fg=FG, bg=BG, anchor='e').grid(row=row, column=col,
-                             padx=(0,PAD) if col<3 else 0, sticky='e')
-                total += c
-            else:
-                for col in range(1,4):
-                    tk.Label(self.cost_frame, text='–', font=FONT_SM,
-                             fg=GRAY, bg=BG, anchor='e').grid(row=row, column=col,
-                             padx=(0,PAD) if col<3 else 0, sticky='e')
-
-        sr = len(active)+2
-        tk.Frame(self.cost_frame, bg=BORDER, height=1).grid(
-            row=sr, column=0, columnspan=4, sticky='ew', pady=(3,2))
-        tk.Label(self.cost_frame, text='Gesamt', font=FONT_SMB,
-                 fg=FG, bg=BG, anchor='w').grid(row=sr+1, column=0,
-                 padx=(0,PAD), sticky='w')
-        for col, val in [(1,total),(2,total),(3,total*2)]:
-            tk.Label(self.cost_frame, text=fmt_eur(val), font=FONT_SMB,
-                     fg=FG, bg=BG, anchor='e').grid(row=sr+1, column=col,
-                     padx=(0,PAD) if col<3 else 0, sticky='e')
-
-    # ── Optimierung ───────────────────────────────────────────
-    def _refresh_mask_panel(self):
-        for w in self.mask_frame.winfo_children():
-            w.destroy()
-        for r in self.results:
-            lab    = r['lab']
-            masked = lab in self.masked
-            color  = GRAY if masked else FG
-            symbol = '⊘' if masked else '✓'
-            lbl = tk.Label(self.mask_frame,
-                           text=f'{symbol} {lab}',
-                           font=FONT_SM, fg=color, bg=BG,
-                           anchor='w', cursor='hand2')
-            lbl.pack(fill='x', pady=1)
-            lbl.bind('<Button-1>', lambda e, l=lab: self._toggle_mask(l))
-            lbl.bind('<Button-3>', lambda e, l=lab: self._toggle_mask(l))
-            # Maskierte Runs anzeigen
-            if not masked:
-                for key in sorted(self.masked_runs):
-                    if key.startswith(lab + '-'):
-                        rl = key.split('-', 1)[1]
-                        sub = tk.Label(self.mask_frame,
-                                       text=f'  ⊘ Run {rl}',
-                                       font=('Arial',8), fg=GRAY, bg=BG,
-                                       anchor='w', cursor='hand2')
-                        sub.pack(fill='x')
-                        sub.bind('<Button-1>', lambda e, k=key: self._toggle_run_mask(k, True))
+    def _heading_menu(self, tree, event):
+        """Rechtsklick auf einen Laborkopf: Labor ein-/ausblenden, Messanzahl setzen."""
+        if tree.identify_region(event.x, event.y) != 'heading':
+            return False
+        try:
+            idx = int(tree.identify_column(event.x).replace('#', '')) - 1
+            cols = list(tree['columns'])
+            if idx < 0 or idx >= len(cols):
+                return True
+            name = cols[idx]
+        except (ValueError, tk.TclError):
+            return True
+        if name in ('Analyt', 'n'):
+            return True
+        menu = tk.Menu(self, tearoff=0)
+        label = 'Labor wieder berücksichtigen' if name in self.masked else 'Labor nicht berücksichtigen'
+        menu.add_command(label=f'{label}: {name}', command=lambda: self._toggle_mask(name))
+        n_now = self.lab_measure_count.get(name, 1)
+        menu.add_command(label=f'Anzahl Messungen setzen … (aktuell {n_now}×)',
+                         command=lambda: self._ask_lab_measure_count(name))
+        menu.tk_popup(event.x_root, event.y_root)
+        return True
 
     def _toggle_mask(self, lab):
         if lab in self.masked:
             self.masked.discard(lab)
         else:
             self.masked.add(lab)
-        self._refresh_mask_panel()
+        var = self._lab_active_vars.get(lab)
+        if var is not None and var.get() != (lab not in self.masked):
+            var.set(lab not in self.masked)
+        self._mark_dirty()
         self._refresh_overview()
-        # Wenn Optimierungsergebnis vorhanden: sofort neu berechnen
         if self.opt_result is not None:
             self._rerun_opt_after_mask()
-        self.update()
-
-    def _overview_rightclick(self, event):
-        """Rechtsklick auf einen Laborkopf in der Übersicht: Messanzahl setzen."""
-        region = self.tree.identify_region(event.x, event.y)
-        col    = self.tree.identify_column(event.x)
-        if region != 'heading':
-            return
-        try:
-            idx = int(col.replace('#', '')) - 1
-            cols = list(self.tree['columns'])
-            if idx < 0 or idx >= len(cols):
-                return
-            lab = cols[idx]
-        except Exception:
-            return
-        if lab in ('Analyt', 'n'):
-            return
-        self._ask_lab_measure_count(lab)
+        state = 'nicht berücksichtigt' if lab in self.masked else 'wieder berücksichtigt'
+        self._set_status(f'Labor {lab} wird {state}.')
 
     def _ask_lab_measure_count(self, lab):
-        """Fragt ab, wie oft ein Labor gemessen hat, und aktualisiert alle Ansichten."""
         current = self.lab_measure_count.get(lab, 1)
         n = simpledialog.askinteger(
-            'Anzahl Messungen',
-            f'Wie oft hat Labor {lab} gemessen?',
-            initialvalue=current, minvalue=1, parent=self)
-        if n is None:
+            'Anzahl Messungen', f'Wie oft misst Labor {lab}?',
+            initialvalue=current, minvalue=1, maxvalue=20, parent=self)
+        if n is not None:
+            self._set_lab_measure_count(lab, n)
+
+    def _set_lab_measure_count(self, lab, n):
+        if n == self.lab_measure_count.get(lab, 1):
             return
         if n == 1:
             self.lab_measure_count.pop(lab, None)
         else:
             self.lab_measure_count[lab] = n
+        var = self._lab_count_vars.get(lab)
+        if var is not None and _safe_int(var, 1) != n:
+            var.set(n)
+        self._mark_dirty()
         self._refresh_overview()
-        if self.opt_result:
-            labs, cost, cov, min_n, target_n = self.opt_result
-            self._render_table(self.opt_tree, labs, coverage=cov,
-                               min_n=min_n, target_n=target_n, show_all_analytes=True)
+        self._refresh_opt_table()
+
+    def _on_lod_toggle(self):
+        self.lod_mode.set('mit' if self.lod_on_var.get() else 'ohne')
+        self._refresh_overview()
+        self._refresh_opt_table()
 
     def _set_lod_mode(self, mode):
-        """Schaltet zwischen 'ohne LOD' (Haken) und 'mit LOD' (LOD-Werte) um."""
-        self.lod_mode.set(mode)
-        # Button-Optik aktualisieren
-        self.lod_btn_ohne.config(
-            bg=FG if mode == 'ohne' else BG, fg=BG if mode == 'ohne' else FG)
-        self.lod_btn_mit.config(
-            bg=FG if mode == 'mit' else BG, fg=BG if mode == 'mit' else FG)
-        self._refresh_overview()
-        if self.opt_result:
-            labs, cost, cov, min_n, target_n = self.opt_result
-            self._render_table(self.opt_tree, labs, coverage=cov,
-                               min_n=min_n, target_n=target_n, show_all_analytes=True)
+        self.lod_on_var.set(mode == 'mit')
+        self._on_lod_toggle()
 
-    def _toggle_ref_run_mask(self, key):
-        """Schaltet einen Run für die Referenz an/aus."""
-        if key in self.ref_masked_runs:
-            self.ref_masked_runs.discard(key)
+    # ══════════════════════════════════════════════════════════
+    # Optimierung
+    # ══════════════════════════════════════════════════════════
+    def _get_params(self):
+        """Liest Min/Ziel/Max und prüft sie. Gibt None zurück, wenn ungültig."""
+        mn = _safe_int(self.min_n_var, None)
+        tg = _safe_int(self.tgt_n_var, None)
+        mx = _safe_int(self.max_n_var, None)
+        if None in (mn, tg, mx) or mn < 1:
+            return None, 'Bitte für Minimum, Ziel und Höchstwert ganze Zahlen ≥ 1 eingeben.'
+        if not (mn <= tg <= mx):
+            return None, f'Es muss gelten: mindestens ({mn}) ≤ Ziel ({tg}) ≤ höchstens ({mx}).'
+        return (mn, tg, mx), ''
+
+    def _on_params_changed(self):
+        params, err = self._get_params()
+        if err:
+            self.opt_hint.set('⚠ ' + err)
+            self.opt_hint_lbl.config(fg=ERR_FG)
+            return
+        if self.opt_result is not None and self._opt_mode == 'opt':
+            _, _, _, mn, tg = self.opt_result
+            if (mn, tg) != params[:2] or self._opt_stale:
+                self.opt_hint.set('Parameter geändert – „Optimieren“ klicken, um neu zu berechnen.')
+                self.opt_hint_lbl.config(fg=WARN_FG)
+                return
+        self._update_opt_hint()
+
+    def _update_opt_hint(self):
+        """Hinweis zu Analyten, die das Minimum nicht erreichen."""
+        self.opt_hint_lbl.config(fg=WARN_FG)
+        if not self.opt_result or self._opt_mode != 'opt':
+            self.opt_hint.set('')
+            return
+        labs, cost, cov, min_n, target_n = self.opt_result
+        low = [a for a, c in cov.items() if c < min_n]
+        if low:
+            shown = ', '.join(sorted(low, key=sort_key)[:5])
+            more  = f' und {len(low)-5} weitere' if len(low) > 5 else ''
+            self.opt_hint.set(f'⚠ {len(low)} Analyt(en) unter Minimum: {shown}{more}')
+            self.opt_hint_lbl.config(fg=ERR_FG)
         else:
-            self.ref_masked_runs.add(key)
-        if self.opt_result:
-            labs, cost, _, _, _ = self.opt_result
-            self._render_opt_labs(labs, cost)
+            self.opt_hint.set('')
 
     def _show_all_labs_overview(self):
-        """Zeigt alle aktiven Labore ohne Optimierung — finaler Überblick."""
+        """Alle aktiven Labore mit allen Runs einplanen — ohne Optimierung."""
         active = self._active()
         if not active:
+            self._set_status('Keine aktiven Labore.', 'warn')
             return
-        # Labs mit selected_runs aufbauen (alle Runs jedes Labors)
         labs = []
         for r in active:
             lab_copy = dict(r)
             runs_d = r.get('runs', {})
             lab_copy['selected_runs'] = list(runs_d.keys())
-            lab_copy['selected_cost'] = sum(
-                (rd.get('cost') or 0) for rd in runs_d.values())
+            lab_copy['selected_cost'] = sum((rd.get('cost') or 0) for rd in runs_d.values())
             labs.append(lab_copy)
         total = sum(r['selected_cost'] for r in labs)
-        self._render_table(self.opt_tree, labs,
-                           coverage=None, min_n=None, target_n=None,
-                           show_all_analytes=True)
-        self._render_opt_costs(labs, total)
-        self.opt_export_btn.config(state='normal')
-        self.opt_preview_btn.config(state='normal')
         self.opt_result = (labs, total, {}, 0, 0)
-        self.opt_status.set(f'Überblick: {len(labs)} Labore — keine Optimierung')
+        self._opt_mode = 'all'
+        self._opt_stale = False
+        self._mark_dirty()
+        self.nb.select(1)
+        self._render_opt_labs(labs, total)
+        self._refresh_opt_table()
+        self.opt_status.set(f'Alle {len(labs)} aktiven Labore · ohne Optimierung')
+        self._update_opt_hint()
+        self._update_ui_state()
 
     def _rerun_opt_after_mask(self):
-        """Optimierung mit aktuell aktiven Laboren neu berechnen.
+        """Ergebnis mit aktuell aktiven Laboren/Runs neu berechnen.
 
-        Wichtig: Alle Runs, die im aktuellen Ergebnis ausgewählt sind,
-        werden als erzwungen behandelt — außer explizit maskierten.
-        So ändert das Maskieren/Erzwingen eines einzelnen Runs nie die
-        Auswahl der anderen Labore (kein unerwartetes Umsortieren).
+        Alle Runs, die im aktuellen Ergebnis gewählt sind, bleiben erhalten —
+        außer explizit abgewählte. So ändert das An-/Abwählen eines einzelnen
+        Runs nie die Auswahl der anderen Labore.
         """
+        if self.opt_result is None:
+            return
+        if self._opt_mode == 'all':
+            self._show_all_labs_overview()
+            return
         active = self._active()
         if not active:
             self.opt_result = None
-            self._render_opt_labs([], 0)
-            self._render_table(self.opt_tree, [], None, None, None)
-            self.opt_status.set('Alle Labore maskiert.')
-            self.opt_export_btn.config(state='disabled')
-            self.opt_preview_btn.config(state='disabled')
+            self._opt_mode = None
+            self._set_status('Alle Labore sind abgewählt.', 'warn')
+            self._update_ui_state()
             return
         prev_labs, _, _, min_n, target_n = self.opt_result
-        max_n = self.max_n_var.get()
-        self.opt_status.set('Aktualisiere…')
+        params, _ = self._get_params()
+        max_n = params[2] if params else 6
 
         masked_runs = set(self.masked_runs)
-        # Alle momentan gewählten Runs einfrieren, damit nur die explizite
-        # Änderung wirkt und der Rest stabil bleibt.
         pinned = set(self.forced_runs)
         for r in prev_labs:
             for rl in r.get('selected_runs', []):
@@ -1610,389 +2051,339 @@ class App(tk.Tk):
         def worker():
             try:
                 labs, cost, cov = optimize(active, min_n, target_n, max_n, masked_runs, pinned)
-                self.after(0, self._on_opt_done, labs, cost, cov, min_n, target_n)
+                self._call_soon(self._on_opt_done, labs, cost, cov, min_n, target_n, True)
             except Exception as e:
                 import traceback; traceback.print_exc()
-                msg = str(e)
-                self.after(0, lambda m=msg: self.opt_status.set(f'Fehler: {m}'))
+                self._call_soon(self._set_status, f'Fehler bei der Neuberechnung: {e}', 'error')
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _run_opt(self):
+        if self._busy:
+            return
         active = self._active()
         if not active:
-            messagebox.showwarning('Keine Daten', 'Zuerst PDFs laden oder Maskierung aufheben.')
+            messagebox.showwarning('Keine Daten',
+                'Es sind keine Labore aktiv.\nBitte PDFs hinzufügen oder Labore links anhaken.',
+                parent=self)
             return
-        min_n    = self.min_n_var.get()
-        target_n = self.tgt_n_var.get()
-        max_n    = self.max_n_var.get()
+        params, err = self._get_params()
+        if err:
+            messagebox.showwarning('Ungültige Abdeckung', err, parent=self)
+            return
+        min_n, target_n, max_n = params
+        self.nb.select(1)
         self.opt_btn.config(state='disabled')
-        self.opt_status.set('Optimierung läuft…')
+        self.opt_status.set('Optimierung läuft …')
+        self.config(cursor='watch')
 
-        # Auch maskierte Runs ausschließen
-        active_runs = [
-            r for r in active
-        ]
         masked_runs = set(self.masked_runs)
         forced_runs = set(self.forced_runs)
 
         def worker():
             try:
-                labs, cost, cov = optimize(active_runs, min_n, target_n, max_n, masked_runs, forced_runs)
-                self.after(0, self._on_opt_done, labs, cost, cov, min_n, target_n)
+                labs, cost, cov = optimize(active, min_n, target_n, max_n, masked_runs, forced_runs)
+                self._call_soon(self._on_opt_done, labs, cost, cov, min_n, target_n, False)
             except Exception as e:
                 msg = str(e)
-                self.after(0, lambda m=msg: [
-                    self.opt_btn.config(state='normal'),
-                    self.opt_status.set(f'Fehler: {m}'),
-                    messagebox.showerror('Fehler', m)
-                ])
+                def fail(m=msg):
+                    self.config(cursor='')
+                    self.opt_btn.config(state='normal')
+                    self.opt_status.set('Optimierung fehlgeschlagen')
+                    messagebox.showerror('Fehler', m, parent=self)
+                self._call_soon(fail)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _render_opt_costs(self, labs, total_cost):
-        """Kostentabelle + Probenrechner rechts im Opt-Tab."""
-        # Kostentabelle
-        self.opt_cost_frame.destroy()
-        self.opt_cost_frame = tk.Frame(self.opt_cost_frame_container, bg=BG)
-        self.opt_cost_frame.pack(fill='x')
-
-        PAD = 8
-        self.opt_cost_frame.columnconfigure(0, minsize=55)
-        self.opt_cost_frame.columnconfigure(1, minsize=65)
-        self.opt_cost_frame.columnconfigure(2, minsize=65)
-        headers = ['', '1×', '2×']
-        for col, h in enumerate(headers):
-            tk.Label(self.opt_cost_frame, text=h, font=FONT_XS, fg=GRAY, bg=BG,
-                     anchor='e').grid(row=0, column=col, padx=(0,PAD) if col<2 else 0,
-                pady=(0,2), sticky='e' if col else 'w')
-        tk.Frame(self.opt_cost_frame, bg=BORDER, height=1).grid(
-            row=1, column=0, columnspan=3, sticky='ew', pady=(0,2))
-
-        total = 0.0
-        row_idx = 2
-        for r in labs:
-            orig      = next((x for x in self.results if x['lab'] == r['lab']), r)
-            runs_data = orig.get('runs', {})
-            sel_runs  = r.get('selected_runs', list(runs_data.keys()))
-
-            c_probe = sum((runs_data.get(rl, {}).get('cost') or 0)
-                         for rl in sel_runs
-                         if f"{r['lab']}-{rl}" not in self.masked_runs)
-            c_ref   = sum((runs_data.get(rl, {}).get('cost') or 0)
-                         for rl in sel_runs
-                         if f"{r['lab']}-{rl}" not in self.ref_masked_runs)
-            total  += c_probe + c_ref
-
-            # Labor-Name
-            tk.Label(self.opt_cost_frame, text=r['lab'], font=FONT_SMB,
-                     fg=FG, bg=BG, anchor='w').grid(
-                row=row_idx, column=0, columnspan=3, sticky='w', pady=(4,0))
-            row_idx += 1
-
-            for lbl, c in [('  Probe', c_probe), ('  Ref', c_ref)]:
-                tk.Label(self.opt_cost_frame, text=lbl, font=FONT_XS,
-                         fg=GRAY, bg=BG, anchor='w').grid(
-                    row=row_idx, column=0, sticky='w')
-                tk.Label(self.opt_cost_frame,
-                         text=fmt_eur(c) if c else '–',
-                         font=FONT_XS, fg=FG, bg=BG, anchor='e').grid(
-                    row=row_idx, column=1, sticky='e', padx=(0,PAD))
-                tk.Label(self.opt_cost_frame,
-                         text=fmt_eur(c*2) if c else '–',
-                         font=FONT_XS, fg=FG, bg=BG, anchor='e').grid(
-                    row=row_idx, column=2, sticky='e')
-                row_idx += 1
-
-        tk.Frame(self.opt_cost_frame, bg=BORDER, height=1).grid(
-            row=row_idx, column=0, columnspan=3, sticky='ew', pady=(3,2))
-        tk.Label(self.opt_cost_frame, text='Gesamt', font=FONT_SMB,
-                 fg=FG, bg=BG).grid(row=row_idx+1, column=0, padx=(0,PAD), sticky='w')
-        self._opt_gesamt_var1 = tk.StringVar(value=fmt_eur(total))
-        self._opt_gesamt_var2 = tk.StringVar(value=fmt_eur(total*2))
-        tk.Label(self.opt_cost_frame, textvariable=self._opt_gesamt_var1,
-                 font=FONT_SMB, fg=FG, bg=BG).grid(
-            row=row_idx+1, column=1, padx=(0,PAD), sticky='e')
-        tk.Label(self.opt_cost_frame, textvariable=self._opt_gesamt_var2,
-                 font=FONT_SMB, fg=FG, bg=BG).grid(
-            row=row_idx+1, column=2, sticky='e')
-
-        # Probenrechner
-        for w in self.opt_probe_outer.winfo_children():
-            w.destroy()
-        if self.opt_probe_var is None:
-            self.opt_probe_var = tk.IntVar(value=0)
-        if self.opt_ref_var is None:
-            self.opt_ref_var = tk.IntVar(value=0)
-
-        # Sicherstellen dass batch-dicts existieren
-        if not hasattr(self, 'probe_batch_vars'):
-            self.probe_batch_vars = {}   # idx -> StringVar
-        if not hasattr(self, 'ref_batch_vars'):
-            self.ref_batch_vars   = {}
-
-        # Spinboxen: Proben, Referenzproben, Messtage
-        if not hasattr(self, 'opt_messtage_var') or self.opt_messtage_var is None:
-            self.opt_messtage_var = tk.IntVar(value=1)
-
-        for label, var in [('Proben', self.opt_probe_var),
-                           ('Referenzproben', self.opt_ref_var),
-                           ('Messtage', self.opt_messtage_var)]:
-            row = tk.Frame(self.opt_probe_outer, bg=BG)
-            row.pack(fill='x', pady=2)
-            tk.Label(row, text=label, font=FONT_SM, fg=FG, bg=BG,
-                     anchor='w').pack(side='left', fill='x', expand=True)
-            sb = tk.Spinbox(row, from_=0 if label != 'Messtage' else 1,
-                            to=9999, width=6,
-                            textvariable=var, font=FONT_SM,
-                            command=lambda: self._rebuild_batch_fields(total_cost, labs))
-            sb.pack(side='right')
-            var.trace_add('write', lambda *_, tc=total_cost, ls=labs:
-                          self._rebuild_batch_fields(tc, ls))
-
-        tk.Frame(self.opt_probe_outer, bg=BORDER, height=1).pack(fill='x', pady=(6,4))
-
-        # Referenz-Checkboxen
-        tk.Label(self.opt_probe_outer, text='Referenz an:',
-                 font=FONT_XS, fg=GRAY, bg=BG).pack(anchor='w', pady=(6,2))
-        if not hasattr(self, 'opt_ref_lab_vars'):
-            self.opt_ref_lab_vars = {}
-        for r in labs:
-            lab = r['lab']
-            if lab not in self.opt_ref_lab_vars:
-                self.opt_ref_lab_vars[lab] = tk.BooleanVar(value=True)
-            cb = tk.Checkbutton(self.opt_probe_outer, text=lab,
-                                variable=self.opt_ref_lab_vars[lab],
-                                font=FONT_SM, bg=BG, fg=FG, activebackground=BG,
-                                command=lambda tc=total_cost, ls=labs:
-                                    self._calc_opt_probe(tc, ls))
-            cb.pack(anchor='w')
-
-        # Chargen in eigener Spalte rechts
-        if hasattr(self, '_batch_container_outer'):
-            for w in self._batch_container_outer.winfo_children():
-                try: w.destroy()
-                except: pass
-            self._batch_container = self._batch_container_outer
-        else:
-            self._batch_container = tk.Frame(self.opt_probe_outer, bg=BG)
-            self._batch_container.pack(fill='x')
-
-        self._batch_labs  = labs
-        self._batch_total = total_cost
-
-        self._opt_total_cost = total_cost
-        self._rebuild_batch_fields(total_cost, labs)
-
-    def _calc_opt_probe(self, total_cost=None, labs=None):
-        try:
-            n  = int(self.opt_probe_var.get())
-            nr = int(self.opt_ref_var.get())
-            mt = max(1, int(self.opt_messtage_var.get())) \
-                 if hasattr(self, 'opt_messtage_var') and self.opt_messtage_var else 1
-        except: return
-        lbl = self.opt_probe_lbl
-        if lbl is None: return
-        try:
-            if n == 0 and nr == 0:
-                lbl.config(text=''); return
-
-            # Probe-Kosten live berechnen
-            if labs is None and self.opt_result:
-                labs = self.opt_result[0]
-            if not labs: lbl.config(text=''); return
-
-            cost_probe = 0.0
-            cost_ref   = 0.0
-            for r in labs:
-                lab = r['lab']
-                orig = next((x for x in self.results if x['lab'] == lab), r)
-                runs_data = orig.get('runs', {})
-                sel_runs  = r.get('selected_runs', list(runs_data.keys()))
-                for rl in sel_runs:
-                    rc = runs_data.get(rl, {}).get('cost') or 0
-                    if f"{lab}-{rl}" not in self.masked_runs:
-                        cost_probe += rc
-                    ref_incl = getattr(self, 'opt_ref_lab_vars', {}).get(
-                        lab, tk.BooleanVar(value=True)).get()
-                    if ref_incl and f"{lab}-{rl}" not in self.ref_masked_runs:
-                        cost_ref += rc
-
-            lines = []
-            if mt > 1:
-                lines.append(f'× {mt} Messtage')
-            if n:
-                lines.append(f'Probe ×1:   {fmt_eur(cost_probe*n*mt)}')
-                lines.append(f'Probe ×2:   {fmt_eur(cost_probe*2*n*mt)}')
-            if nr:
-                lines.append(f'Ref ×1:     {fmt_eur(cost_ref*nr*mt)}')
-                lines.append(f'Ref ×2:     {fmt_eur(cost_ref*2*nr*mt)}')
-            if n and nr:
-                lines.append(f'∑ ×1:  {fmt_eur(cost_probe*n*mt + cost_ref*nr*mt)}')
-                lines.append(f'∑ ×2:  {fmt_eur(cost_probe*2*n*mt + cost_ref*2*nr*mt)}')
-
-            # Gesamt-Labels immer aktualisieren
-            total1 = cost_probe*n*mt + cost_ref*nr*mt
-            total2 = cost_probe*2*n*mt + cost_ref*2*nr*mt
-            if hasattr(self, '_opt_gesamt_var1') and self._opt_gesamt_var1:
-                try:
-                    self._opt_gesamt_var1.set(fmt_eur(total1))
-                    self._opt_gesamt_var2.set(fmt_eur(total2))
-                except Exception:
-                    pass
-            lbl.config(text=chr(10).join(lines))
-        except Exception:
-            pass
-
-    def _rebuild_batch_fields(self, total_cost=None, labs=None):
-        """Baut Chargen-Felder dynamisch nach Proben/Referenz-Anzahl."""
-        self._calc_opt_probe()
-
-        container = getattr(self, '_batch_container', None)
-        if container is None: return
-        try:
-            container.winfo_exists()  # wirft Exception wenn zerstört
-            if not container.winfo_exists(): return
-            children = container.winfo_children()
-        except Exception:
-            return
-
-        for w in children:
-            try: w.destroy()
-            except Exception: pass
-
-        try: n_probe = int(self.opt_probe_var.get())
-        except: n_probe = 0
-        try: n_ref = int(self.opt_ref_var.get())
-        except: n_ref = 0
-
-        if n_probe == 0 and n_ref == 0:
-            return
-
-        # Bestehende Werte sichern
-        old_probe = {k: v.get() for k, v in self.probe_batch_vars.items()}
-        old_ref   = {k: v.get() for k, v in self.ref_batch_vars.items()}
-        self.probe_batch_vars = {}
-        self.ref_batch_vars   = {}
-
-        def section(parent, title, n, old_vals, store):
-            if n == 0: return
-            tk.Label(parent, text=title, font=FONT_XS, fg=GRAY,
-                     bg=BG).pack(anchor='w', pady=(6,1))
-            for i in range(n):
-                row = tk.Frame(parent, bg=BG)
-                row.pack(fill='x', pady=1)
-                tk.Label(row, text=f'{i+1}.',
-                         font=FONT_XS, fg=GRAY, bg=BG, width=2).pack(side='left')
-                var = tk.StringVar(value=old_vals.get(i, ''))
-                store[i] = var
-                tk.Entry(row, textvariable=var, font=FONT_SM,
-                         bg=LIGHT, fg=FG, relief='flat', bd=3).pack(
-                         side='left', fill='x', expand=True)
-
-        section(container, 'Probe-Chargen', n_probe,
-                old_probe, self.probe_batch_vars)
-        section(container, 'Referenz-Chargen', n_ref,
-                old_ref,   self.ref_batch_vars)
-
-    def _get_batches(self):
-        """Liest aktuelle Chargen-Eingaben als dict für PDF-Export."""
-        probe = {i: v.get().strip()
-                 for i, v in getattr(self, 'probe_batch_vars', {}).items()}
-        ref   = {i: v.get().strip()
-                 for i, v in getattr(self, 'ref_batch_vars', {}).items()}
-        return {'probe': probe, 'ref': ref,
-                'ref_masked_runs': set(self.ref_masked_runs)}
-
-    def _on_opt_done(self, labs, cost, cov, min_n, target_n):
+    def _on_opt_done(self, labs, cost, cov, min_n, target_n, silent=False):
+        self.config(cursor='')
         self.opt_btn.config(state='normal')
         if not labs or not cov:
-            self.opt_status.set('Keine Lösung gefunden – alle Labore maskiert?')
+            self.opt_status.set('Keine Lösung gefunden')
+            self.opt_hint.set('Sind alle Labore oder Runs abgewählt?')
             return
+        self.opt_result = (labs, cost, cov, min_n, target_n)
+        self._opt_mode = 'opt'
+        self._opt_stale = False
+        self._mark_dirty()
+        self._show_opt_status()
+        self._render_opt_labs(labs, cost)
+        self._refresh_opt_table()
+        self._update_opt_hint()
+        if not silent:
+            self._set_status('Optimierung abgeschlossen. Runs links per Häkchen anpassen, '
+                             'rechts Proben eintragen, dann exportieren.', 'ok')
+        self._update_ui_state()
+
+    def _show_opt_status(self):
+        labs, cost, cov, min_n, target_n = self.opt_result
         total = len(cov)
         n_min = sum(1 for c in cov.values() if c >= min_n)
         n_tgt = sum(1 for c in cov.values() if c >= target_n)
         self.opt_status.set(
-            f'{len(labs)} Labore · {fmt_eur(cost)} · '
-            f'{n_min}/{total} ≥{min_n}× · {n_tgt}/{total} ≥{target_n}×')
-        self.opt_result = (labs, cost, cov, min_n, target_n)
-        self._render_opt_labs(labs, cost)
-        self._render_table(self.opt_tree, labs, coverage=cov,
-                           min_n=min_n, target_n=target_n, show_all_analytes=True)
-        self.opt_export_btn.config(state='normal')
-        self.opt_preview_btn.config(state='normal')
+            f'{len(labs)} Labore  ·  {fmt_eur(cost)} pro Probe  ·  '
+            f'{n_min}/{total} Analyten ≥ {min_n}×  ·  {n_tgt}/{total} ≥ {target_n}×')
+
+    # ── Kosten + Probenrechner ────────────────────────────────
+    def _lab_costs(self, lab_result):
+        """(Kosten Probe, Kosten Referenz) eines Labors aus den gewählten Runs."""
+        lab = lab_result['lab']
+        orig = next((x for x in self.results if x['lab'] == lab), lab_result)
+        runs_data = orig.get('runs', {})
+        sel_runs  = lab_result.get('selected_runs', list(runs_data.keys()))
+        c_probe = sum((runs_data.get(rl, {}).get('cost') or 0) for rl in sel_runs
+                      if f"{lab}-{rl}" not in self.masked_runs)
+        c_ref   = sum((runs_data.get(rl, {}).get('cost') or 0) for rl in sel_runs
+                      if f"{lab}-{rl}" not in self.ref_masked_runs)
+        return c_probe, c_ref
+
+    def _render_opt_costs(self, labs, total_cost):
+        """Kostentabelle + Referenz-Auswahl rechts im Opt-Tab."""
+        self.opt_cost_frame.destroy()
+        self.opt_cost_frame = tk.Frame(self.opt_cost_frame_container, bg=BG)
+        self.opt_cost_frame.pack(fill='x')
+        f = self.opt_cost_frame
+        f.columnconfigure(0, weight=1)
+
+        for col, h in enumerate(['', 'Einfach', 'Doppelt']):
+            tk.Label(f, text=h, font=FONT_XS, fg=GRAY, bg=BG).grid(
+                row=0, column=col, padx=(0,8) if col < 2 else 0, sticky='e' if col else 'w')
+        tk.Frame(f, bg=BORDER, height=1).grid(row=1, column=0, columnspan=3, sticky='ew', pady=(0,2))
+
+        row_idx = 2
+        sum_probe = sum_ref = 0.0
+        for r in labs:
+            c_probe, c_ref = self._lab_costs(r)
+            sum_probe += c_probe
+            sum_ref   += c_ref
+            tk.Label(f, text=r['lab'], font=FONT_SMB, fg=FG, bg=BG, anchor='w').grid(
+                row=row_idx, column=0, columnspan=3, sticky='w', pady=(4,0))
+            row_idx += 1
+            for lbl, c in [('Probe', c_probe), ('Referenz', c_ref)]:
+                tk.Label(f, text='   ' + lbl, font=FONT_XS, fg=GRAY, bg=BG).grid(
+                    row=row_idx, column=0, sticky='w')
+                tk.Label(f, text=fmt_eur(c) if c else '–', font=FONT_XS, fg=FG, bg=BG).grid(
+                    row=row_idx, column=1, sticky='e', padx=(0,8))
+                tk.Label(f, text=fmt_eur(c*2) if c else '–', font=FONT_XS, fg=FG, bg=BG).grid(
+                    row=row_idx, column=2, sticky='e')
+                row_idx += 1
+
+        tk.Frame(f, bg=BORDER, height=1).grid(row=row_idx, column=0, columnspan=3,
+                                               sticky='ew', pady=(4,2))
+        row_idx += 1
+        for lbl, c in [('Σ Probe', sum_probe), ('Σ Referenz', sum_ref)]:
+            tk.Label(f, text=lbl, font=FONT_SMB, fg=FG, bg=BG).grid(row=row_idx, column=0, sticky='w')
+            tk.Label(f, text=fmt_eur(c), font=FONT_SMB, fg=FG, bg=BG).grid(
+                row=row_idx, column=1, sticky='e', padx=(0,8))
+            tk.Label(f, text=fmt_eur(c*2), font=FONT_SMB, fg=FG, bg=BG).grid(
+                row=row_idx, column=2, sticky='e')
+            row_idx += 1
+
+        # Referenz-Checkboxen
+        for w in self.opt_ref_frame.winfo_children():
+            w.destroy()
+        l = tk.Label(self.opt_ref_frame, text='Referenzproben gehen an:', font=FONT_XS,
+                     fg=GRAY, bg=BG)
+        l.pack(anchor='w', pady=(8,2))
+        grid = tk.Frame(self.opt_ref_frame, bg=BG)
+        grid.pack(fill='x')
+        for i, r in enumerate(labs):
+            lab = r['lab']
+            if lab not in self.opt_ref_lab_vars:
+                self.opt_ref_lab_vars[lab] = tk.BooleanVar(value=True)
+            tk.Checkbutton(grid, text=lab, variable=self.opt_ref_lab_vars[lab],
+                           font=FONT_SM, bg=BG, activebackground=BG, cursor='hand2',
+                           command=self._on_probe_changed).grid(
+                row=i // 2, column=i % 2, sticky='w', padx=(0,10))
+
+        self._calc_opt_probe()
+
+    def _on_probe_changed(self):
+        if self.opt_result is not None:
+            self._mark_dirty()
+        self._calc_opt_probe()
+        self._rebuild_batch_fields()
+
+    def _calc_opt_probe(self, total_cost=None, labs=None):
+        lbl = self.opt_probe_lbl
+        n  = _safe_int(self.opt_probe_var, 0)
+        nr = _safe_int(self.opt_ref_var, 0)
+        mt = max(1, _safe_int(self.opt_messtage_var, 1))
+        if labs is None and self.opt_result:
+            labs = self.opt_result[0]
+        if not labs:
+            lbl.config(text='', fg=FG)
+            return
+        if n == 0 and nr == 0:
+            lbl.config(text='Anzahl Proben oder Referenzproben\neintragen, um die Kosten zu sehen.',
+                       fg=GRAY)
+            return
+
+        cost_probe = cost_ref = 0.0
+        for r in labs:
+            lab = r['lab']
+            orig = next((x for x in self.results if x['lab'] == lab), r)
+            runs_data = orig.get('runs', {})
+            sel_runs  = r.get('selected_runs', list(runs_data.keys()))
+            ref_incl  = self.opt_ref_lab_vars.get(lab, tk.BooleanVar(value=True)).get()
+            for rl in sel_runs:
+                rc = runs_data.get(rl, {}).get('cost') or 0
+                if f"{lab}-{rl}" not in self.masked_runs:
+                    cost_probe += rc
+                if ref_incl and f"{lab}-{rl}" not in self.ref_masked_runs:
+                    cost_ref += rc
+
+        lines = []
+        if mt > 1:
+            lines.append(f'für {mt} Messtage')
+        if n:
+            lines.append(f'Proben  einfach:  {fmt_eur(cost_probe*n*mt)}')
+            lines.append(f'Proben  doppelt:  {fmt_eur(cost_probe*2*n*mt)}')
+        if nr:
+            lines.append(f'Referenz einfach:  {fmt_eur(cost_ref*nr*mt)}')
+            lines.append(f'Referenz doppelt:  {fmt_eur(cost_ref*2*nr*mt)}')
+        if n and nr:
+            lines.append('')
+            lines.append(f'Σ einfach:  {fmt_eur(cost_probe*n*mt + cost_ref*nr*mt)}')
+            lines.append(f'Σ doppelt:  {fmt_eur(cost_probe*2*n*mt + cost_ref*2*nr*mt)}')
+        lbl.config(text='\n'.join(lines), fg=FG)
+
+    def _rebuild_batch_fields(self, total_cost=None, labs=None):
+        """Baut Chargen-Felder passend zur Anzahl Proben/Referenzproben."""
+        container = self._batch_container
+        n_probe = _safe_int(self.opt_probe_var, 0)
+        n_ref   = _safe_int(self.opt_ref_var, 0)
+        if (n_probe, n_ref) == getattr(self, '_batch_shape', None) and container.winfo_children():
+            return
+        self._batch_shape = (n_probe, n_ref)
+
+        old_probe = {k: v.get() for k, v in self.probe_batch_vars.items()}
+        old_ref   = {k: v.get() for k, v in self.ref_batch_vars.items()}
+        for w in container.winfo_children():
+            w.destroy()
+        self.probe_batch_vars = {}
+        self.ref_batch_vars   = {}
+
+        if n_probe == 0 and n_ref == 0:
+            tk.Label(container, text='Erscheint, sobald Proben eingetragen sind.',
+                     font=FONT_XS, fg=GRAY, bg=BG).pack(anchor='w')
+            return
+
+        def section(title, n, old_vals, store):
+            if n == 0: return
+            tk.Label(container, text=title, font=FONT_XS, fg=GRAY,
+                     bg=BG).pack(anchor='w', pady=(6,1))
+            for i in range(min(n, 200)):
+                row = tk.Frame(container, bg=BG)
+                row.pack(fill='x', pady=1)
+                tk.Label(row, text=f'{i+1}.', font=FONT_XS, fg=GRAY, bg=BG,
+                         width=3, anchor='e').pack(side='left', padx=(0,4))
+                var = tk.StringVar(value=old_vals.get(i, ''))
+                var.trace_add('write', lambda *_: self._mark_dirty())
+                store[i] = var
+                tk.Entry(row, textvariable=var, font=FONT_SM, bg=LIGHT, fg=FG,
+                         relief='flat', bd=3).pack(side='left', fill='x', expand=True)
+
+        section('Probe-Chargen', n_probe, old_probe, self.probe_batch_vars)
+        section('Referenz-Chargen', n_ref, old_ref, self.ref_batch_vars)
+
+    def _get_batches(self):
+        """Liest aktuelle Chargen-Eingaben als dict für PDF-Export."""
+        probe = {i: v.get().strip() for i, v in self.probe_batch_vars.items()}
+        ref   = {i: v.get().strip() for i, v in self.ref_batch_vars.items()}
+        return {'probe': probe, 'ref': ref,
+                'ref_masked_runs': set(self.ref_masked_runs)}
+
+    # ── Run-Auswahl je Labor ──────────────────────────────────
+    def _set_run(self, key, probe=None, ref=None):
+        """Run für Probe und/oder Referenz an- oder abwählen."""
+        if probe is not None:
+            if probe:
+                self.masked_runs.discard(key)
+                self.forced_runs.add(key)
+            else:
+                self.masked_runs.add(key)
+                self.forced_runs.discard(key)
+                self.fixed_runs.discard(key)
+        if ref is not None:
+            if ref:
+                self.ref_masked_runs.discard(key)
+            else:
+                self.ref_masked_runs.add(key)
+        self._mark_dirty()
 
     def _render_opt_labs(self, labs, total_cost):
-        for w in self.opt_lab_frame.winfo_children():
-            w.destroy()
+        self.opt_lab_scroll.clear()
+        frame = self.opt_lab_frame
+        self._opt_row_vars = []   # Referenzen halten, sonst verlieren Checkboxen ihren Zustand
+        opt_labs = {r['lab']: r for r in labs}
 
-        # Alle Labore anzeigen — optimierte normal, nicht-optimierte ausgegraut
-        opt_labs = {r['lab'] for r in labs}
-        all_results = list(self.results)
+        # Gewählte Labore zuerst, dann die übrigen
+        ordered = ([r for r in self.results if r['lab'] in opt_labs] +
+                   [r for r in self.results if r['lab'] not in opt_labs])
+        shown_other = False
+        for r in ordered:
+            lab = r['lab']
+            lab_in_opt = lab in opt_labs
+            lab_masked = lab in self.masked
+            if not lab_in_opt and not shown_other:
+                shown_other = True
+                tk.Label(frame, text='Nicht eingeplant', font=FONT_XS, fg=GRAY,
+                         bg=BG).pack(anchor='w', pady=(14,0))
+                tk.Frame(frame, bg=BORDER, height=1).pack(fill='x', pady=(2,0))
 
-        for r in all_results:
-            lab_in_opt = r['lab'] in opt_labs
-            # Für optimierte Labs: opt-Result nutzen; sonst: alle Runs ausgegraut
-            if lab_in_opt:
-                r_display = next((x for x in labs if x['lab'] == r['lab']), r)
-            else:
-                r_display = r
+            r_display = opt_labs.get(lab, r)
             sel_runs  = r_display.get('selected_runs', []) if lab_in_opt else []
-            orig = next((x for x in self.results if x['lab'] == r['lab']), None)
-            runs_data = orig['runs'] if orig else r.get('runs', {})
+            runs_data = r.get('runs', {})
             all_runs  = sorted(runs_data.keys())
+            c_probe, c_ref = self._lab_costs(r_display) if lab_in_opt else (0, 0)
 
-            # Kosten live: Probe (nicht in masked_runs) + Ref (nicht in ref_masked_runs)
-            cost_probe = sum(
-                (runs_data.get(rl, {}).get('cost') or 0)
-                for rl in sel_runs
-                if f"{r['lab']}-{rl}" not in self.masked_runs
-            )
-            cost_ref = sum(
-                (runs_data.get(rl, {}).get('cost') or 0)
-                for rl in sel_runs
-                if f"{r['lab']}-{rl}" not in self.ref_masked_runs
-            )
-            sel_cost = cost_probe + cost_ref
+            hdr = tk.Frame(frame, bg=BG)
+            hdr.pack(fill='x', pady=(8,1))
+            av = tk.BooleanVar(value=not lab_masked)
+            self._opt_row_vars.append(av)
+            cb = tk.Checkbutton(hdr, text=lab, variable=av, font=FONT_SMB,
+                                bg=BG, activebackground=BG, cursor='hand2',
+                                fg=FG if not lab_masked else GRAY,
+                                command=lambda l=lab: self._toggle_mask(l))
+            cb.pack(side='left')
+            Tooltip(cb, 'Labor berücksichtigen / nicht berücksichtigen')
+            info = (f'{fmt_eur(c_probe)}' if lab_in_opt else
+                    'deaktiviert' if lab_masked else 'nicht benötigt')
+            tk.Label(hdr, text=info, font=FONT_XS, fg=GRAY, bg=BG).pack(side='right')
 
-            # Labor-Header
-            hdr = tk.Frame(self.opt_lab_frame, bg=BG)
-            hdr.pack(fill='x', pady=(6,1))
-            tk.Label(hdr, text=r['lab'], font=FONT_SMB, bg=BG, fg=FG,
-                     anchor='w').pack(side='left')
-
-            # Alle Runs anzeigen — gewählte und nicht gewählte
-            # Header-Zeile für Probe/Ref-Spalten
-            hdr2 = tk.Frame(self.opt_lab_frame, bg=BG)
-            hdr2.pack(fill='x', padx=(10,0))
-            tk.Label(hdr2, text='', font=FONT_XS, bg=BG, width=19,
-                     anchor='w').pack(side='left')
-            tk.Label(hdr2, text='Probe', font=FONT_XS, fg=GRAY,
-                     bg=BG, width=6, anchor='center').pack(side='left')
-            tk.Label(hdr2, text='Ref', font=FONT_XS, fg=GRAY,
-                     bg=BG, width=4, anchor='center').pack(side='left')
-            tk.Label(hdr2, text='Fix', font=FONT_XS, fg=GRAY,
-                     bg=BG, width=4, anchor='center').pack(side='right', padx=(0,4))
+            if lab_masked or not runs_data:
+                continue
 
             for rl in all_runs:
                 rd  = runs_data.get(rl, {})
                 rc  = rd.get('cost') or 0
-                key = f"{r['lab']}-{rl}"
-                masked_probe = key in self.masked_runs
-                masked_ref   = key in self.ref_masked_runs
-                selected     = rl in sel_runs
-                not_chosen   = not selected and not masked_probe and lab_in_opt
-                # Nicht-optimierte Labore: alle Runs ausgegraut
-                if not lab_in_opt:
-                    not_chosen = True
+                key = f"{lab}-{rl}"
+                selected = rl in sel_runs
+                probe_on = selected and key not in self.masked_runs
+                ref_on   = probe_on and key not in self.ref_masked_runs
+                bg = BG if selected else LIGHT
 
-                sub = tk.Frame(self.opt_lab_frame,
-                               bg=LIGHT if not_chosen else BG)
-                sub.pack(fill='x', padx=(10,0), pady=1)
+                sub = tk.Frame(frame, bg=bg)
+                sub.pack(fill='x', padx=(18,0), pady=1)
 
-                # Fix-Checkbox rechts
-                fix_var = tk.BooleanVar(value=key in self.fixed_runs)
-                def _on_fix(k=key, v=fix_var):
+                pv = tk.BooleanVar(value=probe_on)
+                rv = tk.BooleanVar(value=ref_on)
+                fv = tk.BooleanVar(value=key in self.fixed_runs)
+                self._opt_row_vars += [pv, rv, fv]
+
+                def on_probe(k=key, v=pv):
+                    self._set_run(k, probe=v.get(), ref=v.get())
+                    self._rerun_opt_after_mask()
+
+                def on_ref(k=key, v=rv):
+                    self._set_run(k, ref=v.get())
+                    # nach dem Klick neu zeichnen (nicht innerhalb des Widget-Callbacks)
+                    self.after_idle(lambda: self.opt_result and (
+                        self._render_opt_labs(self.opt_result[0], self.opt_result[1]),
+                        self._refresh_opt_table()))
+
+                def on_fix(k=key, v=fv):
                     if v.get():
                         self.fixed_runs.add(k)
                         self.forced_runs.add(k)
@@ -2000,219 +2391,96 @@ class App(tk.Tk):
                     else:
                         self.fixed_runs.discard(k)
                         self.forced_runs.discard(k)
-                    self._refresh_mask_panel()
-                    if self.opt_result:
-                        self._rerun_opt_after_mask()
-                fix_cb = tk.Checkbutton(sub, variable=fix_var, command=_on_fix,
-                                        bg=sub['bg'], activebackground=sub['bg'],
-                                        padx=0, pady=0, bd=0, cursor='hand2')
-                fix_cb.pack(side='right', padx=(0,4))
+                    self._mark_dirty()
+                    self._rerun_opt_after_mask()
 
-                # Run-Name + Kosten — klickbar für Toggle
-                if not_chosen:
-                    run_col = '#cccccc'
-                elif masked_probe:
-                    run_col = '#aaaaaa'
-                else:
-                    run_col = FG
+                tk.Checkbutton(sub, variable=pv, command=on_probe, bg=bg,
+                               activebackground=bg, cursor='hand2', width=2).pack(side='left')
+                ref_cb = tk.Checkbutton(sub, variable=rv, command=on_ref, bg=bg,
+                                        activebackground=bg, cursor='hand2', width=2,
+                                        state='normal' if probe_on else 'disabled')
+                ref_cb.pack(side='left')
 
-                run_lbl = tk.Label(sub,
-                    text=f"Run {rl}  {fmt_eur(rc)}",
-                    font=('Arial', 8), bg=sub['bg'], fg=run_col,
-                    anchor='w', width=18, cursor='hand2')
-                run_lbl.pack(side='left')
-                def _is_active(k, lab_, rl_):
-                    in_sel = any(
-                        rl_ in (res.get('selected_runs') or [])
-                        for res in (self.opt_result[0] if self.opt_result else [])
-                        if res['lab'] == lab_
-                    ) or k in self.forced_runs
-                    return in_sel and k not in self.masked_runs
+                fg = FG if probe_on else GRAY
+                name = tk.Label(sub, text=f'Run {rl}', font=FONT_SM, bg=bg, fg=fg,
+                                anchor='w', cursor='hand2')
+                name.pack(side='left', padx=(4,0))
+                name.bind('<Button-1>', lambda e, v=pv, f=on_probe: (v.set(not v.get()), f()))
+                n_an = len(rd.get('analytes', []))
+                tk.Label(sub, text=f'({n_an})', font=FONT_XS, bg=bg,
+                         fg=GRAY).pack(side='left', padx=(4,0))
 
-                def _toggle_both(e, k=key, lab_=r['lab'], rl_=rl):
-                    if _is_active(k, lab_, rl_):
-                        self.masked_runs.add(k)
-                        self.ref_masked_runs.add(k)
-                        self.forced_runs.discard(k)
-                    else:
-                        self.masked_runs.discard(k)
-                        self.ref_masked_runs.discard(k)
-                        self.forced_runs.add(k)
-                    self._refresh_mask_panel()
-                    if self.opt_result:
-                        self._rerun_opt_after_mask()
-                run_lbl.bind('<Button-1>', _toggle_both)
+                fix_cb = tk.Checkbutton(sub, variable=fv, command=on_fix, bg=bg,
+                                        activebackground=bg, cursor='hand2')
+                fix_cb.pack(side='right')
+                tk.Label(sub, text=fmt_eur(rc), font=FONT_XS, bg=bg, fg=fg).pack(side='right', padx=(0,6))
 
-                # Probe-Toggle
-                if not_chosen:
-                    p_sym, p_col = '○', '#cccccc'
-                elif masked_probe:
-                    p_sym, p_col = '⊘', '#aaaaaa'
-                else:
-                    p_sym, p_col = '✓', FG
-                probe_lbl = tk.Label(sub, text=p_sym, font=('Arial', 8),
-                                     bg=sub['bg'], fg=p_col, width=6,
-                                     anchor='center', cursor='hand2')
-                probe_lbl.pack(side='left')
-                def _toggle_probe(e, k=key, lab_=r['lab'], rl_=rl):
-                    if _is_active(k, lab_, rl_):
-                        self.masked_runs.add(k)
-                        self.forced_runs.discard(k)
-                    else:
-                        self.masked_runs.discard(k)
-                        self.forced_runs.add(k)
-                    self._refresh_mask_panel()
-                    if self.opt_result:
-                        self._rerun_opt_after_mask()
-                probe_lbl.bind('<Button-1>', _toggle_probe)
+                tip = ', '.join(rd.get('analytes', [])) or 'keine Analyten'
+                Tooltip(name, f'Run {rl} – {n_an} Analyten:\n{tip}')
 
-                # Ref-Toggle
-                if not_chosen:
-                    r_sym, r_col = '○', '#cccccc'
-                elif masked_ref:
-                    r_sym, r_col = '⊘', '#aaaaaa'
-                else:
-                    r_sym, r_col = '✓', FG
-                ref_lbl = tk.Label(sub, text=r_sym, font=('Arial', 8),
-                                   bg=sub['bg'], fg=r_col, width=4,
-                                   anchor='center', cursor='hand2')
-                ref_lbl.pack(side='left')
-                ref_lbl.bind('<Button-1>', lambda e, k=key:
-                             self._toggle_ref_run_mask(k))
-
-                n_analytes = len(rd.get('analytes', []))
-                tk.Label(sub, text=f"({n_analytes})",
-                         font=('Arial',8), bg=sub['bg'],
-                         fg='#cccccc' if not_chosen else BORDER).pack(side='right')
-
-        # Kostentabelle + Probenrechner rechts neu aufbauen
         self._render_opt_costs(labs, total_cost)
-
-        if self.opt_probe_lbl is not None:
-            try: self.opt_probe_lbl.destroy()
-            except: pass
-        self.opt_probe_lbl = tk.Label(self.opt_lab_frame, text='', font=FONT_SM,
-                                      fg=FG, bg=BG, anchor='w', justify='left')
-        self.opt_probe_lbl.pack(anchor='w', pady=(4,0))
-        self._opt_total_cost = total_cost
-
-        def _calc(*_):
-            try:
-                n  = int(self.opt_probe_var.get())
-                nr = int(self.opt_ref_var.get())
-            except: return
-            tc = self._opt_total_cost
-            lbl = self.opt_probe_lbl
-            if lbl is None: return
-            try:
-                if tc == 0 or (n == 0 and nr == 0):
-                    lbl.config(text=''); return
-                lines = []
-                if n:
-                    lines.append(f'Einfachbestimmung Probe:   {fmt_eur(tc*n)}')
-                    lines.append(f'Doppelbestimmung Probe:    {fmt_eur(tc*2*n)}')
-                if nr:
-                    lines.append(f'Doppelbestimmung Referenz: {fmt_eur(tc*2*nr)}')
-                if n and nr:
-                    lines.append(f'∑ Einfach:  {fmt_eur(tc*n + tc*nr)}')
-                    lines.append(f'∑ Doppelt:  {fmt_eur(tc*2*n + tc*2*nr)}')
-                lbl.config(text=chr(10).join(lines))
-            except Exception:
-                pass
-
-        self.opt_probe_var.trace_add('write', _calc)
-        self.opt_ref_var.trace_add('write', _calc)
-        _calc()  # Sofort neu berechnen mit bestehenden Werten
+        self._rebuild_batch_fields()
 
     def _opt_rightclick(self, event):
-        """Rechtsklick auf Zeile: zeige Runs für diesen Analyten zum Maskieren."""
-        region = self.opt_tree.identify_region(event.x, event.y)
-        col    = self.opt_tree.identify_column(event.x)
-
-        # Spaltenheader-Klick: Labor maskieren / Messanzahl setzen
-        if region == 'heading':
-            try:
-                idx = int(col.replace('#','')) - 1
-                cols = list(self.opt_tree['columns'])
-                if idx < 0 or idx >= len(cols): return
-                name = cols[idx]
-            except: return
-            if name in ('Analyt','n'): return
-            menu = tk.Menu(self, tearoff=0)
-            label = 'Einblenden' if name in self.masked else 'Maskieren'
-            menu.add_command(label=f'{label}: {name}',
-                command=lambda: self._toggle_mask(name))
-            n_now = self.lab_measure_count.get(name, 1)
-            menu.add_command(label=f'Anzahl Messungen setzen (aktuell: {n_now}×)',
-                command=lambda: self._ask_lab_measure_count(name))
-            menu.tk_popup(event.x_root, event.y_root)
+        """Rechtsklick in der Abdeckungstabelle."""
+        if self._heading_menu(self.opt_tree, event):
             return
-
         row_id = self.opt_tree.identify_row(event.y)
-        if not row_id: return
-
-        # Zeilen-Klick: Run-Optionen anbieten
-        if not self.opt_result: return
-        labs, cost, cov, min_n, target_n = self.opt_result
+        if not row_id or not self.opt_result:
+            return
+        analyte = self.opt_tree.item(row_id, 'values')[0]
+        labs = self.opt_result[0]
         menu = tk.Menu(self, tearoff=0)
         added = False
         for r in labs:
-            sel_runs = r.get('selected_runs', [])
-            for rl in sel_runs:
-                key = f"{r['lab']}-{rl}"
+            for rl in r.get('selected_runs', []):
                 rd = r.get('runs', {}).get(rl, {})
+                if not any(a.lower() == str(analyte).lower() for a in rd.get('analytes', [])):
+                    continue
+                key = f"{r['lab']}-{rl}"
                 rc = rd.get('cost', 0) or 0
-                label = f"{'Einblenden' if key in self.masked_runs else 'Maskieren'}: {r['lab']} Run {rl} ({fmt_eur(rc)})"
+                on = key not in self.masked_runs
+                label = f"{'Abwählen' if on else 'Wieder anwählen'}: {r['lab']} Run {rl} ({fmt_eur(rc)})"
                 menu.add_command(label=label,
-                    command=lambda k=key: self._toggle_run_mask(k))
+                    command=lambda k=key, on=on: (self._set_run(k, probe=not on, ref=not on),
+                                                  self._rerun_opt_after_mask()))
                 added = True
         if added:
             menu.tk_popup(event.x_root, event.y_root)
 
-    def _toggle_run_mask(self, key, selected):
-        """
-        Dreizustand:
-        - Gewählt + nicht maskiert → maskieren
-        - Maskiert → wieder aktivieren (unmaskieren)
-        - Nicht gewählt → erzwingen (forced_runs)
-        - Erzwungen → zurücksetzen
-        """
+    def _toggle_run_mask(self, key, selected=True):
+        """Kompatibilität: gewählten Run ab-/anwählen bzw. nicht gewählten erzwingen."""
         if selected:
-            # Gewählter Run: toggle maskieren
             if key in self.masked_runs:
                 self.masked_runs.discard(key)
             else:
                 self.masked_runs.add(key)
         else:
-            # Nicht gewählter Run: toggle erzwingen
             if key in self.forced_runs:
                 self.forced_runs.discard(key)
             else:
                 self.forced_runs.add(key)
-        self._refresh_mask_panel()
-        if self.opt_result:
-            self._rerun_opt_after_mask()
+        self._mark_dirty()
+        self._rerun_opt_after_mask()
 
-    # ── Planung Speichern / Laden / Archivieren ───────────────
+    # ══════════════════════════════════════════════════════════
+    # Planung Speichern / Laden / Archivieren
+    # ══════════════════════════════════════════════════════════
     def _state_to_dict(self):
         """Serialisiert den kompletten App-Zustand als dict."""
-        import json
         opt = None
         if self.opt_result:
             labs, cost, cov, min_n, target_n = self.opt_result
             opt = {
-                'labs': [
-                    {k: v for k, v in r.items()
-                     if k not in ('_result',)}
-                    for r in labs
-                ],
+                'labs': [{k: v for k, v in r.items() if k not in ('_result',)} for r in labs],
                 'cost': cost,
                 'cov':  cov,
                 'min_n': min_n,
                 'target_n': target_n,
+                'mode': self._opt_mode,
             }
         return {
-            'version':      2,
+            'version':      3,
             'files':        self.files,
             'masked':       list(self.masked),
             'masked_runs':     list(self.masked_runs),
@@ -2220,14 +2488,18 @@ class App(tk.Tk):
             'forced_runs':     list(self.forced_runs),
             'fixed_runs':      list(self.fixed_runs),
             'lab_measure_count': dict(self.lab_measure_count),
-            'min_n':        self.min_n_var.get()  if hasattr(self, 'min_n_var')  else 3,
-            'target_n':     self.tgt_n_var.get()  if hasattr(self, 'tgt_n_var')  else 5,
-            'max_n':        self.max_n_var.get()  if hasattr(self, 'max_n_var')  else 6,
-            'n_proben':     self.n_proben_var.get() if self.n_proben_var else 0,
-            'n_ref':        self.n_ref_var.get()    if self.n_ref_var    else 0,
-            'opt_n_proben': self.opt_probe_var.get() if self.opt_probe_var else 0,
-            'opt_n_ref':    self.opt_ref_var.get()   if self.opt_ref_var  else 0,
-            'opt_messtage': self.opt_messtage_var.get() if hasattr(self, 'opt_messtage_var') and self.opt_messtage_var else 1,
+            'lod_mode':     self.lod_mode.get(),
+            'min_n':        _safe_int(self.min_n_var, 3),
+            'target_n':     _safe_int(self.tgt_n_var, 5),
+            'max_n':        _safe_int(self.max_n_var, 6),
+            'opt_n_proben': _safe_int(self.opt_probe_var, 0),
+            'opt_n_ref':    _safe_int(self.opt_ref_var, 0),
+            'opt_messtage': _safe_int(self.opt_messtage_var, 1),
+            'ref_labs':     {lab: v.get() for lab, v in self.opt_ref_lab_vars.items()},
+            'batches_probe': {str(i): v.get() for i, v in self.probe_batch_vars.items()},
+            'batches_ref':   {str(i): v.get() for i, v in self.ref_batch_vars.items()},
+            'art_nrs':      dict(self._art_nrs),
+            'last_export_meta': list(self._last_export_meta[:3]),
             'opt_result':   opt,
             'archive_dir':  self._archive_dir,
             'results_meta': [
@@ -2238,115 +2510,7 @@ class App(tk.Tk):
             ],
         }
 
-    def _state_from_dict(self, d):
-        """Stellt App-Zustand aus dict wieder her (PDFs werden neu geparst)."""
-        self.files       = d.get('files', [])
-        self.masked      = set(d.get('masked', []))
-        self.masked_runs = set(d.get('masked_runs', []))
-        self.forced_runs     = set(d.get('forced_runs', []))
-        self.fixed_runs      = set(d.get('fixed_runs', []))
-        self.ref_masked_runs = set(d.get('ref_masked_runs', []))
-        self.lab_measure_count = dict(d.get('lab_measure_count', {}))
-        self._archive_dir    = d.get('archive_dir')
-
-        if hasattr(self, 'min_n_var'):  self.min_n_var.set(d.get('min_n', 3))
-        if hasattr(self, 'tgt_n_var'):  self.tgt_n_var.set(d.get('target_n', 5))
-        if hasattr(self, 'max_n_var'):  self.max_n_var.set(d.get('max_n', 6))
-
-        # Dateiliste UI aktualisieren
-        self.file_lb.delete(0, 'end')
-        missing = []
-        for p in list(self.files):
-            if os.path.exists(p):
-                self.file_lb.insert('end', os.path.basename(p))
-            else:
-                missing.append(p)
-                self.files.remove(p)
-        if missing:
-            messagebox.showwarning('Fehlende Dateien',
-                'Folgende PDFs wurden nicht gefunden und wurden entfernt:\n' +
-                '\n'.join(os.path.basename(p) for p in missing))
-
-        # PDFs neu parsen
-        if self.files:
-            self.results = []
-            self.run_btn.config(state='disabled')
-            self.progress['maximum'] = len(self.files)
-            self.progress['value']   = 0
-            saved_state = d
-
-            def worker():
-                for i, path in enumerate(self.files):
-                    self.status_var.set(f'Lade {i+1}/{len(self.files)}: {os.path.basename(path)}…')
-                    try:
-                        r = parse_pdf(path)
-                        self.results.append(r)
-                    except Exception as e:
-                        self.results.append({'lab': os.path.basename(path)[:15],
-                                             'analytes': [], 'cost': None,
-                                             'filename': os.path.basename(path)})
-                    self.progress['value'] = i + 1
-                self.after(0, self._on_load_done, saved_state)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-    def _on_load_done(self, d):
-        self.run_btn.config(state='normal')
-        if hasattr(self, 'opt_btn'):
-            self.opt_btn.config(state='normal')
-        self._refresh_overview()
-        self._refresh_mask_panel()
-        self.export_btn.config(state='normal' if self.results else 'disabled')
-
-        if self.n_proben_var: self.n_proben_var.set(d.get('n_proben', 0))
-        if self.n_ref_var:    self.n_ref_var.set(d.get('n_ref', 0))
-
-        # Optimierungsergebnis wiederherstellen
-        opt = d.get('opt_result')
-        if opt:
-            try:
-                labs_raw = opt['labs']
-                # Ergebnis-Labore mit echten results verknüpfen
-                labs = []
-                for lr in labs_raw:
-                    orig = next((r for r in self.results if r['lab'] == lr['lab']), None)
-                    if orig:
-                        r2 = dict(orig)
-                        r2['selected_runs'] = lr.get('selected_runs', [])
-                        r2['selected_cost'] = lr.get('selected_cost', 0)
-                        labs.append(r2)
-                cov      = opt['cov']
-                min_n    = opt['min_n']
-                target_n = opt['target_n']
-                cost     = opt['cost']
-                self.opt_result = (labs, cost, cov, min_n, target_n)
-                self._render_opt_labs(labs, cost)
-                self._render_table(self.opt_tree, labs, coverage=cov,
-                                   min_n=min_n, target_n=target_n, show_all_analytes=True)
-                self.opt_export_btn.config(state='normal')
-                self.opt_preview_btn.config(state='normal')
-                if self.opt_probe_var:
-                    self.opt_probe_var.set(d.get('opt_n_proben', 0))
-                if self.opt_ref_var:
-                    self.opt_ref_var.set(d.get('opt_n_ref', 0))
-                if hasattr(self, 'opt_messtage_var') and self.opt_messtage_var:
-                    self.opt_messtage_var.set(d.get('opt_messtage', 1))
-                n_min = sum(1 for c in cov.values() if c >= min_n)
-                n_tgt = sum(1 for c in cov.values() if c >= target_n)
-                self.opt_status.set(
-                    f'{len(labs)} Labore · {fmt_eur(cost)} · '
-                    f'{n_min}/{len(cov)} ≥{min_n}× · {n_tgt}/{len(cov)} ≥{target_n}×')
-            except Exception as e:
-                self.opt_status.set(f'Optimierung konnte nicht wiederhergestellt werden: {e}')
-
-        self.status_var.set(f'Planung geladen · {len(self.results)} Labore.')
-
-    def _new_planning(self):
-        if self.results or self.files:
-            if not messagebox.askyesno('Neue Planung',
-                    'Aktuelle Planung verwerfen und neu beginnen?'):
-                return
-        # Zustand zurücksetzen
+    def _reset_state(self):
         self.files        = []
         self.results      = []
         self.masked       = set()
@@ -2356,359 +2520,429 @@ class App(tk.Tk):
         self.ref_masked_runs = set()
         self.lab_measure_count = {}
         self.opt_result   = None
+        self._opt_mode    = None
+        self._opt_stale   = False
         self._planning_path = None
         self.probe_batch_vars = {}
         self.ref_batch_vars   = {}
+        self.opt_ref_lab_vars = {}
+        self._batch_shape = None
+        self._art_nrs = {}
+        self._last_export_meta = ('', '', '', {})
+        self.opt_probe_var.set(0)
+        self.opt_ref_var.set(0)
+        self.opt_messtage_var.set(1)
 
-        # UI zurücksetzen
         self.file_lb.delete(0, 'end')
-        self.title('Analyte Comparison')
-        self.status_var.set('Bereit.')
-        self.progress['value'] = 0
-        self.export_btn.config(state='disabled')
-
-        # Übersicht leeren
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        # Opt-Tab leeren
-        for w in self.opt_lab_frame.winfo_children():
-            w.destroy()
-        for w in self.opt_cost_frame.winfo_children():
-            w.destroy()
-        for w in self.opt_probe_outer.winfo_children():
-            w.destroy()
-        for item in self.opt_tree.get_children():
-            self.opt_tree.delete(item)
+        self.tree.delete(*self.tree.get_children())
+        self.opt_tree.delete(*self.opt_tree.get_children())
+        self.opt_lab_scroll.clear()
         self.opt_status.set('')
-        self.opt_export_btn.config(state='disabled')
-        self.opt_preview_btn.config(state='disabled')
-        self.opt_result = None
-        self.opt_probe_var = None
-        self.opt_ref_var   = None
-        self.opt_probe_lbl = None
+        self.opt_hint.set('')
+        self._refresh_lab_list()
 
-        # Masken-Panel leeren
-        for w in self.mask_frame.winfo_children():
-            w.destroy()
+    def _state_from_dict(self, d, path=None):
+        """Stellt App-Zustand aus dict wieder her (PDFs werden neu geparst)."""
+        self._reset_state()
+        self._planning_path = path
+        self.files       = list(d.get('files', []))
+        self.masked      = set(d.get('masked', []))
+        self.masked_runs = set(d.get('masked_runs', []))
+        self.forced_runs     = set(d.get('forced_runs', []))
+        self.fixed_runs      = set(d.get('fixed_runs', []))
+        self.ref_masked_runs = set(d.get('ref_masked_runs', []))
+        self.lab_measure_count = dict(d.get('lab_measure_count', {}))
+        self._archive_dir    = d.get('archive_dir') or self._archive_dir
+        self._art_nrs        = dict(d.get('art_nrs', {}))
+        lem = (list(d.get('last_export_meta') or []) + ['', '', ''])[:3]
+        self._last_export_meta = (*lem, dict(self._art_nrs))
+        self.lod_on_var.set(d.get('lod_mode') == 'mit')
+        self.lod_mode.set('mit' if self.lod_on_var.get() else 'ohne')
 
-    def _save_planning(self):
+        self.min_n_var.set(d.get('min_n', 3))
+        self.tgt_n_var.set(d.get('target_n', 5))
+        self.max_n_var.set(d.get('max_n', 6))
+
+        missing = [p for p in self.files if not os.path.exists(p)]
+        self.files = [p for p in self.files if os.path.exists(p)]
+        for p in self.files:
+            self.file_lb.insert('end', os.path.basename(p))
+        if missing:
+            messagebox.showwarning('Fehlende Dateien',
+                'Folgende PDFs wurden nicht gefunden und werden nicht berücksichtigt:\n\n' +
+                '\n'.join(os.path.basename(p) for p in missing), parent=self)
+
+        d['_missing'] = bool(missing)
+        self._mark_dirty(bool(missing))
+        if self.files:
+            self._parse_files(list(self.files), reset=True,
+                              on_done=lambda: self._on_load_done(d))
+        else:
+            self._update_ui_state()
+
+    def _on_load_done(self, d):
+        self._refresh_lab_list()
+        self._refresh_overview()
+
+        for lab, val in (d.get('ref_labs') or {}).items():
+            self.opt_ref_lab_vars[lab] = tk.BooleanVar(value=bool(val))
+        self.probe_batch_vars = {int(k): tk.StringVar(value=v)
+                                 for k, v in (d.get('batches_probe') or {}).items()}
+        self.ref_batch_vars   = {int(k): tk.StringVar(value=v)
+                                 for k, v in (d.get('batches_ref') or {}).items()}
+        self._batch_shape = None
+
+        opt = d.get('opt_result')
+        if opt:
+            try:
+                labs = []
+                for lr in opt['labs']:
+                    orig = next((r for r in self.results if r['lab'] == lr['lab']), None)
+                    if orig:
+                        r2 = dict(orig)
+                        r2['selected_runs'] = lr.get('selected_runs', [])
+                        r2['selected_cost'] = lr.get('selected_cost', 0)
+                        labs.append(r2)
+                cov, min_n, target_n, cost = opt['cov'], opt['min_n'], opt['target_n'], opt['cost']
+                self.opt_result = (labs, cost, cov, min_n, target_n)
+                self._opt_mode = opt.get('mode') or ('opt' if cov else 'all')
+                self.opt_probe_var.set(d.get('opt_n_proben', 0))
+                self.opt_ref_var.set(d.get('opt_n_ref', 0))
+                self.opt_messtage_var.set(d.get('opt_messtage', 1))
+                self._render_opt_labs(labs, cost)
+                self._refresh_opt_table()
+                if self._opt_mode == 'opt':
+                    self._show_opt_status()
+                else:
+                    self.opt_status.set(f'Alle {len(labs)} aktiven Labore · ohne Optimierung')
+                self._update_opt_hint()
+            except Exception as e:
+                self.opt_result = None
+                self.opt_status.set('Optimierung konnte nicht wiederhergestellt werden')
+                self.opt_hint.set(str(e))
+
+        # Laden selbst ist keine Änderung (außer es fehlten Dateien)
+        self._mark_dirty(bool(d.get('_missing')))
+        self._set_status(f'Planung geladen · {len(self.results)} Labore.', 'ok')
+        self._update_ui_state()
+
+    def _confirm_discard(self, action='fortfahren'):
+        """Fragt bei ungespeicherten Änderungen nach. True = weitermachen."""
+        if not self._dirty or not (self.results or self.files):
+            return True
+        ans = messagebox.askyesnocancel('Ungespeicherte Änderungen',
+            f'Die aktuelle Planung hat ungespeicherte Änderungen.\n\n'
+            f'Vorher speichern?', parent=self)
+        if ans is None:
+            return False
+        if ans:
+            return self._save_planning()
+        return True
+
+    def _new_planning(self):
+        if self._busy or not self._confirm_discard():
+            return
+        self._reset_state()
+        self._mark_dirty(False)
+        self._set_status('Neue Planung. PDF-Dateien hinzufügen, um zu beginnen.')
+        self.nb.select(0)
+        self._update_ui_state()
+
+    def _save_planning(self, save_as=False):
         import json
         if not self.results:
-            messagebox.showwarning('Nichts zu speichern', 'Zuerst PDFs laden.')
-            return
-        path = self._planning_path or filedialog.asksaveasfilename(
-            defaultextension='.wz',
-            filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')],
-            initialfile='Planung.wz')
-        if not path: return
+            self._set_status('Nichts zu speichern – zuerst PDFs laden.', 'warn')
+            return False
+        path = self._planning_path if not save_as else None
+        if not path:
+            path = filedialog.asksaveasfilename(
+                parent=self, defaultextension='.wz',
+                filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')],
+                initialfile=os.path.basename(self._planning_path or 'Planung.wz'))
+        if not path:
+            return False
         try:
-            import json
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(self._state_to_dict(), f, ensure_ascii=False, indent=2)
-            self._planning_path = path
-            self.title(f'Analyte Comparison — {os.path.basename(path)}')
-            self.status_var.set(f'Gespeichert: {os.path.basename(path)}')
         except Exception as e:
-            messagebox.showerror('Fehler', str(e))
+            messagebox.showerror('Speichern fehlgeschlagen', str(e), parent=self)
+            return False
+        self._planning_path = path
+        self._mark_dirty(False)
+        self._set_status(f'Gespeichert: {os.path.basename(path)}', 'ok')
+        return True
 
     def _load_planning(self):
         import json
+        if self._busy or not self._confirm_discard():
+            return
         path = filedialog.askopenfilename(
-            filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')])
-        if not path: return
+            parent=self, filetypes=[('WZ-Planung','*.wz'), ('Alle','*.*')])
+        if not path:
+            return
         try:
             with open(path, encoding='utf-8') as f:
                 d = json.load(f)
-            self._planning_path = path
-            self.title(f'Analyte Comparison — {os.path.basename(path)}')
-            self._state_from_dict(d)
         except Exception as e:
-            messagebox.showerror('Fehler', str(e))
-
-    def _archive_planning(self):
-        """Speichert Planung als .wz + exportiert PDF in Archiv-Ordner."""
-        import json
-        if not self.results:
-            messagebox.showwarning('Nichts zu archivieren', 'Zuerst PDFs laden.')
+            messagebox.showerror('Öffnen fehlgeschlagen',
+                f'Die Datei konnte nicht gelesen werden:\n{e}', parent=self)
             return
+        self._state_from_dict(d, path)
 
-        # Archiv-Ordner bestimmen
-        arch_dir = self._archive_dir
-        if not arch_dir or not os.path.isdir(arch_dir):
-            arch_dir = filedialog.askdirectory(title='Archiv-Ordner wählen')
-            if not arch_dir: return
-            self._archive_dir = arch_dir
+    def _choose_archive_dir(self):
+        d = filedialog.askdirectory(parent=self, title='Archiv-Ordner wählen',
+                                    initialdir=self._archive_dir or None)
+        if d:
+            self._archive_dir = d
+            self._mark_dirty()
+            self._set_status(f'Archiv-Ordner: {d}', 'ok')
+        return d
 
-        # Export-Metadaten abfragen (RV, Produkt, Kommentar, Chargen)
-        results_for_meta = (
-            [r for r, _ in zip(
-                (next((r for r in self.results if r['lab']==lr['lab']), None)
-                 for lr in self.opt_result[0]), range(100))
-             if r] if self.opt_result else self._active()
-        )
-        meta = self._ask_export_meta(results_for_meta or self._active())
-        if meta is None: return
-        rv, product, comment, art_nrs = meta if len(meta) == 4 else (*meta, {})
-        batches  = self._get_batches()
-        n_proben = self.opt_probe_var.get() if self.opt_probe_var else 0
-        n_ref    = self.opt_ref_var.get()   if self.opt_ref_var   else 0
-        mt       = max(1, self.opt_messtage_var.get()) if hasattr(self, 'opt_messtage_var') and self.opt_messtage_var else 1
-        n_proben = n_proben * mt
-        n_ref    = n_ref    * mt
+    def _export_counts(self):
+        mt = max(1, _safe_int(self.opt_messtage_var, 1))
+        return _safe_int(self.opt_probe_var, 0) * mt, _safe_int(self.opt_ref_var, 0) * mt
 
+    def _default_stem(self, labs, rv, product):
         date_str  = datetime.date.today().strftime('%d.%m.%Y')
         rv_part   = f"RV_{rv}_" if rv else ''
         prod_part = re.sub(r'[^\w\-]', '_', product)[:30] + '_' if product else ''
-        active    = self._active()
-        labs_used = (self.opt_result[0] if self.opt_result else active)
-        _all_labs = [r['lab'] for r in labs_used]
-        lab_codes = '_'.join(_all_labs[:8])
-        if len(_all_labs) > 8:
-            lab_codes += f'_+{len(_all_labs)-8}weitere'
-        stem      = f"{rv_part}WZ-Planung_{prod_part}{lab_codes}_{date_str}"
+        names     = [r['lab'] for r in labs]
+        lab_codes = '_'.join(names[:8])
+        if len(names) > 8:
+            lab_codes += f'_+{len(names)-8}weitere'
+        return f"{rv_part}WZ-Planung_{prod_part}{lab_codes}_{date_str}"
 
+    def _archive_planning(self):
+        """Speichert Planung als .wz + exportiert PDF in den Archiv-Ordner."""
+        import json
+        if not self.opt_result:
+            self._set_status('Zuerst optimieren oder „Alle Labore übernehmen“.', 'warn')
+            return
+        arch_dir = self._archive_dir
+        if not arch_dir or not os.path.isdir(arch_dir):
+            arch_dir = self._choose_archive_dir()
+            if not arch_dir:
+                return
+
+        labs, cost, cov, min_n, target_n = self.opt_result
+        meta = self._ask_export_meta(labs, action=f'Archivieren nach\n{arch_dir}')
+        if meta is None:
+            return
+        rv, product, comment, art_nrs = meta
+        stem     = self._default_stem(labs, rv, product)
         pdf_path = os.path.join(arch_dir, stem + '.pdf')
         wz_path  = os.path.join(arch_dir, stem + '.wz')
-
+        if os.path.exists(pdf_path) and not messagebox.askyesno('Datei existiert',
+                f'{os.path.basename(pdf_path)} existiert bereits.\nÜberschreiben?', parent=self):
+            return
+        n_proben, n_ref = self._export_counts()
         try:
-            # PDF exportieren
-            if self.opt_result:
-                labs, cost, cov, min_n, target_n = self.opt_result
-                ref_vars = getattr(self, 'opt_ref_lab_vars', {})
-                self._build_pdf(pdf_path, labs, cov, min_n, target_n,
-                                n_proben=n_proben, n_ref=n_ref,
-                                ref_lab_vars=ref_vars, comment=comment,
-                                batches=batches)
-            else:
-                self._build_pdf(pdf_path, active, None, None, None,
-                                n_proben=n_proben, n_ref=n_ref,
-                                ref_lab_vars=self.ref_lab_vars,
-                                comment=comment, batches=batches)
-            # Planung speichern
+            self.config(cursor='watch'); self.update_idletasks()
+            self._build_pdf(pdf_path, labs, cov,
+                            min_n, target_n, n_proben=n_proben, n_ref=n_ref,
+                            ref_lab_vars=self.opt_ref_lab_vars, comment=comment,
+                            batches=self._get_batches(), rv=rv, product=product,
+                            art_nrs=art_nrs)
+            self._planning_path = wz_path
             with open(wz_path, 'w', encoding='utf-8') as f:
                 json.dump(self._state_to_dict(), f, ensure_ascii=False, indent=2)
-            self._planning_path = wz_path
-            self.title(f'Analyte Comparison — {os.path.basename(wz_path)}')
-            self._toast(f'✓  Archiviert: {os.path.basename(pdf_path)}')
+            self._mark_dirty(False)
+            self._toast(f'Archiviert: {os.path.basename(pdf_path)}', open_path=pdf_path)
         except Exception as e:
-            messagebox.showerror('Fehler', str(e))
+            messagebox.showerror('Archivieren fehlgeschlagen', str(e), parent=self)
+        finally:
+            self.config(cursor='')
 
-    # ── PDF Export ────────────────────────────────────────────
-    def _toast(self, message, duration=2500):
-        """Zeigt eine kurze Erfolgsmeldung mittig auf dem Bildschirm."""
+    # ── Meldungen / Dialoge ───────────────────────────────────
+    def _toast(self, message, duration=5000, open_path=None):
+        """Kurze Erfolgsmeldung unten rechts – blockiert die Arbeit nicht."""
         dlg = tk.Toplevel(self)
         dlg.overrideredirect(True)
         dlg.attributes('-topmost', True)
-        dlg.configure(bg='#2d6a2d')
-
-        # Inhalt
-        inner = tk.Frame(dlg, bg='#2d6a2d', padx=28, pady=20)
+        dlg.configure(bg=OK_FG)
+        inner = tk.Frame(dlg, bg=OK_FG, padx=16, pady=12)
         inner.pack()
-        tk.Label(inner, text='✓', font=('Arial', 28), bg='#2d6a2d',
-                 fg='white').pack()
-        tk.Label(inner, text=message, font=FONT_SM, bg='#2d6a2d',
-                 fg='white', wraplength=320, justify='center').pack(pady=(6,14))
-        tk.Button(inner, text='OK', font=FONT_B, bg='white', fg='#2d6a2d',
-                  relief='flat', padx=24, pady=6, cursor='hand2', bd=0,
-                  command=dlg.destroy).pack()
-
-        # Zentrieren
+        tk.Label(inner, text='✓  ' + message, font=FONT_SM, bg=OK_FG, fg='white',
+                 wraplength=360, justify='left').pack(side='left')
+        if open_path:
+            def _open():
+                try: _open_file(open_path)
+                except Exception as e: messagebox.showerror('Fehler', str(e), parent=self)
+                dlg.destroy()
+            tk.Button(inner, text='Öffnen', font=FONT_SMB, bg='white', fg=OK_FG,
+                      relief='flat', padx=10, pady=2, cursor='hand2', bd=0,
+                      command=_open).pack(side='left', padx=(12,0))
+        tk.Button(inner, text='✕', font=FONT_SM, bg=OK_FG, fg='white', relief='flat',
+                  bd=0, cursor='hand2', activebackground=OK_FG,
+                  command=dlg.destroy).pack(side='left', padx=(8,0))
         dlg.update_idletasks()
-        w = dlg.winfo_reqwidth()
-        h = dlg.winfo_reqheight()
-        x = self.winfo_x() + self.winfo_width()  // 2 - w // 2
-        y = self.winfo_y() + self.winfo_height() // 2 - h // 2
+        x = self.winfo_rootx() + self.winfo_width()  - dlg.winfo_reqwidth()  - 24
+        y = self.winfo_rooty() + self.winfo_height() - dlg.winfo_reqheight() - 48
         dlg.geometry(f'+{x}+{y}')
+        dlg.after(duration, lambda: dlg.winfo_exists() and dlg.destroy())
+        self._set_status(message, 'ok')
 
-        # Auch nach duration automatisch schließen
-        dlg.after(duration, lambda: dlg.destroy() if dlg.winfo_exists() else None)
-
-    def _ask_export_meta(self, results):
+    def _ask_export_meta(self, results, action='PDF exportieren'):
+        """Dialog für RV-Nummer, Produkt, Kommentar und Artikelnummern.
+        Gibt (rv, product, comment, art_nrs) zurück oder None bei Abbruch."""
         products = [r.get('product','') for r in results if r.get('product')]
-        default_product = max(set(products), key=products.count) if products else ''
+        last_rv, last_prod, last_comment = self._last_export_meta[:3]
+        default_product = last_prod or (max(set(products), key=products.count) if products else '')
 
         dlg = tk.Toplevel(self)
-        dlg.title('Export-Informationen')
+        dlg.title('Angaben für den Export')
+        dlg.transient(self)
         dlg.resizable(True, True)
-        dlg.grab_set()
         dlg.configure(bg=BG)
-        dlg.minsize(440, 400)
-
+        dlg.minsize(460, 420)
         self.update_idletasks()
-        x = self.winfo_x() + self.winfo_width()  // 2 - 220
-        y = self.winfo_y() + self.winfo_height() // 2 - 250
-        dlg.geometry(f'460x500+{x}+{y}')
+        x = self.winfo_rootx() + self.winfo_width()  // 2 - 240
+        y = self.winfo_rooty() + self.winfo_height() // 2 - 280
+        dlg.geometry(f'480x560+{max(0,x)}+{max(0,y)}')
+        dlg.grab_set()
 
         result = [None]
-        art_entries = {}  # lab -> Entry
+        art_entries = {}
 
-        def _ok():
-            rv_raw = rv_entry.get().strip()
-            if rv_raw == 'z.B. 25-26': rv_raw = ''
+        def _ok(*_):
             art_nrs = {lab: e.get().strip() for lab, e in art_entries.items()}
-            result[0] = (rv_raw, prod_entry.get().strip(),
+            result[0] = (rv_entry.get().strip(), prod_entry.get().strip(),
                          txt.get('1.0', 'end').strip(), art_nrs)
             dlg.destroy()
 
-        def _cancel():
-            dlg.destroy()
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        dlg.bind('<Control-Return>', _ok)
 
-        dlg.bind('<Escape>',         lambda e: _cancel())
-        dlg.bind('<Control-Return>', lambda e: _ok())
-
-        # Buttons unten (fest)
-        sep = tk.Frame(dlg, bg=BORDER, height=1)
-        sep.pack(side='bottom', fill='x')
-        btn_row = tk.Frame(dlg, bg=BG, padx=16, pady=10)
+        tk.Frame(dlg, bg=BORDER, height=1).pack(side='bottom', fill='x')
+        btn_row = tk.Frame(dlg, bg=LIGHT, padx=16, pady=10)
         btn_row.pack(side='bottom', fill='x')
-        tk.Button(btn_row, text='Abbrechen', command=_cancel,
-                  font=FONT_SM, bg=BG, fg=GRAY, relief='flat',
-                  padx=12, pady=5, cursor='hand2', bd=0).pack(side='right', padx=(8,0))
-        tk.Button(btn_row, text='PDF exportieren', command=_ok,
-                  font=FONT_SM, bg=FG, fg=BG, relief='flat',
-                  padx=12, pady=5, cursor='hand2', bd=0).pack(side='right')
+        tk.Label(btn_row, text='Strg+Enter = bestätigen · Esc = abbrechen',
+                 font=FONT_XS, fg=GRAY, bg=LIGHT).pack(side='left')
+        self._button(btn_row, 'Abbrechen', dlg.destroy, primary=False).pack(side='right', padx=(8,0))
+        ok_label = 'Archivieren' if action.startswith('Archiv') else 'Weiter …'
+        self._button(btn_row, ok_label, _ok, primary=True).pack(side='right')
 
-        # Formular (scrollbar)
-        outer = tk.Frame(dlg, bg=BG)
-        outer.pack(fill='both', expand=True)
-        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side='right', fill='y')
-        canvas.pack(side='left', fill='both', expand=True)
-        form = tk.Frame(canvas, bg=BG, padx=20, pady=16)
-        win_id = canvas.create_window((0,0), window=form, anchor='nw')
-        canvas.bind('<Configure>', lambda e: canvas.itemconfig(win_id, width=e.width))
-        form.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        sf = ScrollFrame(dlg, width=440, padx=20, pady=16)
+        sf.pack(fill='both', expand=True)
+        form = sf.inner
 
-        tk.Label(form, text='Export PDF', font=FONT_B,
-                 bg=BG, fg=FG).pack(anchor='w', pady=(0,12))
+        tk.Label(form, text='Angaben für den Export', font=FONT_H, bg=BG, fg=FG).pack(anchor='w')
+        tk.Label(form, text=action, font=FONT_XS, bg=BG, fg=GRAY, justify='left').pack(anchor='w', pady=(0,12))
 
         def labeled_entry(label, default='', hint=''):
-            tk.Label(form, text=label, font=FONT_XS, fg=GRAY,
-                     bg=BG).pack(anchor='w', pady=(0,2))
-            e = tk.Entry(form, font=FONT_SM, bg=LIGHT, fg=FG, relief='flat', bd=4)
-            e.pack(fill='x', pady=(0,10))
+            tk.Label(form, text=label, font=FONT_SMB, fg=FG, bg=BG).pack(anchor='w', pady=(0,2))
+            e = tk.Entry(form, font=FONT_SM, bg=LIGHT, fg=FG, relief='flat', bd=5)
+            e.pack(fill='x', pady=(0,2))
             if default:
                 e.insert(0, default)
-            elif hint:
-                e.insert(0, hint); e.config(fg=GRAY)
-                def _fi(ev, en=e, h=hint):
-                    if en.get()==h: en.delete(0,'end'); en.config(fg=FG)
-                def _fo(ev, en=e, h=hint):
-                    if not en.get(): en.insert(0,h); en.config(fg=GRAY)
-                e.bind('<FocusIn>', _fi); e.bind('<FocusOut>', _fo)
+            if hint:
+                tk.Label(form, text=hint, font=FONT_XS, fg=GRAY, bg=BG).pack(anchor='w')
+            tk.Frame(form, bg=BG, height=8).pack()
             return e
 
-        rv_entry   = labeled_entry('RV-Nummer', hint='z.B. 25-26')
-        prod_entry = labeled_entry('Produkt', default=default_product)
+        rv_entry   = labeled_entry('RV-Nummer', last_rv, 'z. B. 25-26 – wird Teil des Dateinamens')
+        prod_entry = labeled_entry('Produkt', default_product,
+                                   'aus den PDFs übernommen – bei Bedarf anpassen')
 
-        tk.Label(form, text='Kommentar / Notizen', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,2))
+        tk.Label(form, text='Kommentar / Notizen', font=FONT_SMB, fg=FG, bg=BG).pack(anchor='w', pady=(0,2))
         txt_frame = tk.Frame(form, bg=BORDER, padx=1, pady=1)
         txt_frame.pack(fill='x', pady=(0,12))
-        txt = tk.Text(txt_frame, font=FONT_SM, bg=BG, fg=FG,
-                      relief='flat', bd=0, wrap='word', height=2,
-                      padx=6, pady=4)
+        txt = tk.Text(txt_frame, font=FONT_SM, bg=BG, fg=FG, relief='flat', bd=0,
+                      wrap='word', height=3, padx=6, pady=4)
         txt.pack(fill='x')
+        if last_comment:
+            txt.insert('1.0', last_comment)
 
-        # Artikelnummern pro Labor
         tk.Frame(form, bg=BORDER, height=1).pack(fill='x', pady=(4,8))
-        tk.Label(form, text='Artikelnummern (für SelectLine)', font=FONT_XS,
-                 fg=GRAY, bg=BG).pack(anchor='w', pady=(0,6))
+        tk.Label(form, text='Artikelnummern (für SelectLine)', font=FONT_SMB,
+                 fg=FG, bg=BG).pack(anchor='w')
+        tk.Label(form, text='optional – werden für den nächsten Export gemerkt',
+                 font=FONT_XS, fg=GRAY, bg=BG).pack(anchor='w', pady=(0,6))
         for r in results:
             lab = r['lab']
             row = tk.Frame(form, bg=BG)
             row.pack(fill='x', pady=2)
             tk.Label(row, text=lab, font=FONT_SM, fg=FG, bg=BG,
-                     width=8, anchor='w').pack(side='left')
-            e = tk.Entry(row, font=FONT_SM, bg=LIGHT, fg=FG,
-                         relief='flat', bd=4, width=20)
-            # Vorausfüllen aus gespeicherten Artikelnummern
-            saved = getattr(self, '_art_nrs', {}).get(lab, '')
-            if saved:
-                e.insert(0, saved)
+                     width=10, anchor='w').pack(side='left')
+            e = tk.Entry(row, font=FONT_SM, bg=LIGHT, fg=FG, relief='flat', bd=4, width=20)
+            if self._art_nrs.get(lab):
+                e.insert(0, self._art_nrs[lab])
             e.pack(side='left', fill='x', expand=True)
             art_entries[lab] = e
 
         rv_entry.focus_set()
         self.wait_window(dlg)
-        # Artikelnummern für nächsten Export merken
         if result[0]:
-            self._art_nrs = result[0][3]
+            self._art_nrs.update(result[0][3])
+            self._last_export_meta = result[0]
+            self._mark_dirty()
         return result[0]
 
+    # ── PDF Export ────────────────────────────────────────────
     def _export_overview(self):
-        """Delegiert an _export_opt — exportiert immer die Optimierung."""
         self._export_opt()
 
     def _preview_opt(self):
-        """Erstellt PDF in temp-Ordner und öffnet es direkt."""
-        if not self.opt_result: return
+        """Erstellt das PDF in einem temporären Ordner und öffnet es."""
+        if not self.opt_result:
+            return
         labs, cost, cov, min_n, target_n = self.opt_result
         import tempfile
+        rv, product, comment, art_nrs = self._last_export_meta
+        n_proben, n_ref = self._export_counts()
         try:
-            n_proben = self.opt_probe_var.get() if self.opt_probe_var else 0
-            n_ref    = self.opt_ref_var.get()   if self.opt_ref_var   else 0
-            mt       = max(1, self.opt_messtage_var.get()) if hasattr(self, 'opt_messtage_var') and self.opt_messtage_var else 1
-            n_proben = n_proben * mt
-            n_ref    = n_ref    * mt
-            batches  = self._get_batches()
-            ref_vars = getattr(self, 'opt_ref_lab_vars', {})
-
-            # Letzte Export-Metadaten verwenden (rv, product, comment, art_nrs)
-            last = getattr(self, '_last_export_meta', ('', '', '', {}))
-            rv, product, comment = last[0], last[1], last[2]
-            art_nrs = last[3] if len(last) > 3 else {}
-
-            tmp = tempfile.NamedTemporaryFile(
-                suffix='.pdf', prefix='WZ_Vorschau_', delete=False)
+            self.config(cursor='watch'); self.update_idletasks()
+            tmp = tempfile.NamedTemporaryFile(suffix='.pdf', prefix='WZ_Vorschau_', delete=False)
             tmp.close()
-
-            self._build_pdf(tmp.name, labs, cov, min_n, target_n,
-                            n_proben=n_proben, n_ref=n_ref,
-                            ref_lab_vars=ref_vars, comment=comment,
-                            batches=batches, rv=rv, product=product,
-                            art_nrs=art_nrs)
-            os.startfile(tmp.name)
+            self._build_pdf(tmp.name, labs, cov,
+                            min_n, target_n, n_proben=n_proben, n_ref=n_ref,
+                            ref_lab_vars=self.opt_ref_lab_vars, comment=comment,
+                            batches=self._get_batches(), rv=rv, product=product,
+                            art_nrs=art_nrs or self._art_nrs)
+            _open_file(tmp.name)
+            self._set_status('Vorschau geöffnet.', 'ok')
         except Exception as e:
-            import traceback
-            messagebox.showerror('Fehler', traceback.format_exc())
+            import traceback; traceback.print_exc()
+            messagebox.showerror('Vorschau fehlgeschlagen', str(e), parent=self)
+        finally:
+            self.config(cursor='')
 
     def _export_opt(self):
-        if not self.opt_result: return
+        if not self.opt_result:
+            self._set_status('Zuerst optimieren oder „Alle Labore übernehmen“.', 'warn')
+            return
         labs, cost, cov, min_n, target_n = self.opt_result
         meta = self._ask_export_meta(labs)
-        if meta is None: return
-        rv, product, comment, art_nrs = meta if len(meta) == 4 else (*meta, {})
-        self._last_export_meta = (rv, product, comment, art_nrs)
-        batches  = self._get_batches()
-        n_proben = self.opt_probe_var.get() if self.opt_probe_var else 0
-        n_ref    = self.opt_ref_var.get()   if self.opt_ref_var   else 0
-        mt       = max(1, self.opt_messtage_var.get()) if hasattr(self, 'opt_messtage_var') and self.opt_messtage_var else 1
-        n_proben = n_proben * mt
-        n_ref    = n_ref    * mt
-        date_str  = datetime.date.today().strftime('%d.%m.%Y')
-        _all_labs = [r['lab'] for r in labs]
-        lab_codes = '_'.join(_all_labs[:8])
-        if len(_all_labs) > 8:
-            lab_codes += f'_+{len(_all_labs)-8}weitere'
-        rv_part   = f"RV_{rv}_" if rv else ''
-        prod_part = re.sub(r'[^\w\-]', '_', product)[:30] + '_' if product else ''
-        default   = f"{rv_part}WZ-Planung_{prod_part}{lab_codes}_{date_str}.pdf"
-        path = filedialog.asksaveasfilename(defaultextension='.pdf',
-            filetypes=[('PDF','*.pdf')], initialfile=default)
-        if not path: return
+        if meta is None:
+            return
+        rv, product, comment, art_nrs = meta
+        n_proben, n_ref = self._export_counts()
+        path = filedialog.asksaveasfilename(parent=self, defaultextension='.pdf',
+            filetypes=[('PDF','*.pdf')], initialfile=self._default_stem(labs, rv, product) + '.pdf')
+        if not path:
+            return
         try:
-            ref_vars = getattr(self, 'opt_ref_lab_vars', {})
-            self._build_pdf(path, labs, cov, min_n, target_n,
-                            n_proben=n_proben, n_ref=n_ref, ref_lab_vars=ref_vars,
-                            comment=comment, batches=batches, rv=rv, product=product, art_nrs=art_nrs)
-            self._toast(f'✓  PDF gespeichert: {os.path.basename(path)}')
+            self.config(cursor='watch'); self.update_idletasks()
+            self._build_pdf(path, labs, cov,
+                            min_n, target_n, n_proben=n_proben, n_ref=n_ref,
+                            ref_lab_vars=self.opt_ref_lab_vars, comment=comment,
+                            batches=self._get_batches(), rv=rv, product=product,
+                            art_nrs=art_nrs)
+            self._toast(f'PDF gespeichert: {os.path.basename(path)}', open_path=path)
         except Exception as e:
-            import traceback
-            messagebox.showerror('Fehler', traceback.format_exc())
+            import traceback; traceback.print_exc()
+            messagebox.showerror('Export fehlgeschlagen', str(e), parent=self)
+        finally:
+            self.config(cursor='')
+
+    def _on_close(self):
+        if self._busy:
+            if not messagebox.askyesno('Beenden', 'Es werden gerade PDFs eingelesen.\nTrotzdem beenden?',
+                                       parent=self):
+                return
+        elif not self._confirm_discard():
+            return
+        self.destroy()
 
     def _build_pdf(self, path, results, coverage, min_n, target_n,
                    n_proben=0, n_ref=0, ref_lab_vars=None, comment='',
