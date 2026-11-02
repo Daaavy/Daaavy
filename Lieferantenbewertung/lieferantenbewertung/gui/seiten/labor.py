@@ -74,7 +74,7 @@ class LaborSeite(tk.Frame):
 
     def neue_bewertung(self):
         """Leeres Formular öffnen (nachfragen, falls noch Werte eingetragen sind)."""
-        if not self.eingabe.befuellt() or messagebox.askyesno(
+        if not self.eingabe.geaendert() or messagebox.askyesno(
                 "Neue Bewertung", "Das Formular enthält noch Werte. Leeren und neu beginnen?"):
             self.eingabe.leeren()
         self.reiter.zeige(ERFASSEN)

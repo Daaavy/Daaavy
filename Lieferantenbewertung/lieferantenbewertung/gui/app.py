@@ -148,17 +148,14 @@ class App(tk.Tk):
         """Zeigt die Laborseite; optional mit einem Eintrag im Bearbeitungsformular."""
         ls = self.labor_seite
         if code != ls.code and ls.code:
-            if ls.eingabe.befuellt():
-                antwort = dialoge.frage_laborwechsel(self, code)
+            if ls.eingabe.geaendert():
+                antwort = dialoge.frage_laborwechsel(self, ls.code, code)
+                if antwort == "speichern" and not ls.eingabe.speichern():
+                    antwort = "abbrechen"  # Speichern abgebrochen oder Eingabe ungültig
                 if antwort == "abbrechen":
                     self.nav.markiere(self.aktiv)
                     return False
-                if antwort == "verwerfen":
-                    ls.eingabe.leeren()
-                else:
-                    ls.eingabe.neu_beginnen()
-            else:
-                ls.eingabe.leeren()
+            ls.eingabe.leeren()
         self.aktiv = code
         ls.tkraise()
         ls.anzeigen(code, reiter=ERFASSEN if eintrag else reiter)

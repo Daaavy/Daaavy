@@ -134,6 +134,26 @@ class Eingabe(tk.Frame):
         else:
             self.lbl_modus.pack_forget()
 
+    def _zustand(self, mit_monat=True):
+        werte = tuple(v.get().strip() for k, v in self.formular.items()
+                      if mit_monat or k not in ("monat", "jahr"))
+        return werte + (self.k_kostenlos.get(), self.e_kommentar.get("1.0", "end").strip())
+
+    def _stand_merken(self):
+        """Aktuellen Formularinhalt als 'unverändert' merken (nach Leeren, Öffnen, Speichern)."""
+        self._gemerkt = (self._zustand(True), self._zustand(False))
+
+    def geaendert(self) -> bool:
+        """True, wenn seit dem Öffnen/Leeren tatsächlich etwas eingegeben oder geändert wurde.
+
+        Bei einer neuen Bewertung zählt ein anderer Monat allein nicht als Änderung.
+        """
+        if not hasattr(self, "_gemerkt"):
+            return False
+        if self.bearbeitungs_id:
+            return self._zustand(True) != self._gemerkt[0]
+        return self._zustand(False) != self._gemerkt[1]
+
     def befuellt(self) -> bool:
         if any(v.get().strip() for k, v in self.formular.items() if k not in ("monat", "jahr")):
             return True
@@ -148,6 +168,7 @@ class Eingabe(tk.Frame):
         self._kostenlos_umschalten()
         self.e_kommentar.delete("1.0", "end")
         self._bearbeitung_setzen(None)
+        self._stand_merken()
 
     def neu_beginnen(self):
         """Werte behalten, aber als neuen Eintrag speichern."""
@@ -224,6 +245,7 @@ class Eingabe(tk.Frame):
         self.e_kommentar.delete("1.0", "end")
         self.e_kommentar.insert("1.0", eintrag.get("kommentar", ""))
         self._bearbeitung_setzen(eintrag.get("id"))
+        self._stand_merken()
 
     def vorschau(self):
         if not hasattr(self, "lbl_vorschau") or not hasattr(self, "e_kommentar"):
@@ -243,26 +265,27 @@ class Eingabe(tk.Frame):
                      f"S {fmt(sc.service)}   →   {sc.gesamt:.1f} {text}", fg=STATUS_TEXTFARBEN[key])
 
     # ── Aktionen ──────────────────────────────────────────────────────────
-    def speichern(self):
+    def speichern(self) -> bool:
+        """Speichert die Bewertung. -> True bei Erfolg."""
         labor = self.labor_fn()
         if not labor:
-            return
+            return False
         try:
             eintrag = self.eintrag()
         except ValueError as err:
             messagebox.showwarning("Ungültige Eingabe", str(err))
-            return
+            return False
         hinweise = scoring.plausibilitaet(eintrag)
         if hinweise and not messagebox.askyesno(
                 "Bitte prüfen", "\n".join(f"• {h}" for h in hinweise) + "\n\nTrotzdem speichern?"):
-            return
+            return False
         doppelt = self.app.store.duplikat(labor, eintrag)
         if doppelt:
             if not messagebox.askyesno(
                     "Überschreiben?",
                     f"Prüfnummer '{eintrag['pruefnummer']}' ({doppelt['produkt']} {doppelt['konzentration']}, "
                     f"{doppelt['monat']}) existiert bei {labor} bereits. Überschreiben?"):
-                return
+                return False
             if self.bearbeitungs_id and self.bearbeitungs_id != doppelt["id"]:
                 self.app.store.eintrag_loeschen(self.bearbeitungs_id)
             eintrag["id"] = doppelt["id"]
@@ -272,6 +295,7 @@ class Eingabe(tk.Frame):
         self.app.status(f"Gespeichert: {labor} · {eintrag['produkt']} {eintrag['konzentration']} · {eintrag['monat']}")
         if self.nach_speichern:
             self.nach_speichern()
+        return True
 
     def _level(self):
         if self.labor_fn():

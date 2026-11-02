@@ -18,6 +18,12 @@ python start.py
 `labordaten.json` und `preise.json` liegen wie bisher im Programmordner (oder
 in dem Ordner, der in `config.ini` eingetragen ist).
 
+### Update auf eine neue Version
+
+Die ZIP enthält nur das Programm, keine Daten. Neue Version **über den
+bestehenden Ordner entpacken** und Dateien ersetzen lassen. `labordaten.json`,
+`preise.json` und `config.ini` bleiben dabei erhalten.
+
 ### Access-Datenbank
 
 Die Anbindung ist optional. Dazu `config.example.ini` als `config.ini`

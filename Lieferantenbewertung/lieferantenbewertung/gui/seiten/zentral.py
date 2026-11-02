@@ -7,7 +7,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox
 
-from ... import charts, config, pdf_export, scoring
+from ... import charts, pdf_export, scoring
 from ..rund import RundFrame
 from ..widgets import (ACCENT, BG, FONT, FONT_B, FONT_SM, STATUS_TEXTFARBEN, TEXT, TEXT2, WHITE,
                        button, combobox, eingabe, fmt, tabelle)
@@ -42,6 +42,16 @@ class StartSeite(Seite):
         anzahl = sum(k["n"] for k in kz.values())
         seitenkopf(p, "Start", f"Stand {datetime.now():%d.%m.%Y}  ·  {len(kz)} Labore  ·  {anzahl} Bewertungen")
 
+        if not kz:
+            rf = RundFrame(p, radius=16, pad=16)
+            rf.pack(fill="x", padx=24, pady=10)
+            tk.Label(rf.inhalt, text="Keine Bewertungsdaten gefunden", font=FONT_B, bg=WHITE, fg=TEXT,
+                     anchor="w").pack(fill="x")
+            tk.Label(rf.inhalt, text=f"Gesucht in: {os.path.abspath(app.store.pfad)}\n\n"
+                                     "Wenn du schon Daten hast: labordaten.json und preise.json in diesen Ordner "
+                                     "kopieren und das Programm neu starten.",
+                     font=FONT, bg=WHITE, fg=TEXT2, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
+            return
         status_zahl = {"ok": 0, "warn": 0, "bad": 0, "none": 0}
         for k in kz.values():
             status_zahl[scoring.status(k["g"])[0]] += 1
@@ -72,13 +82,7 @@ class StartSeite(Seite):
                      fg=TEXT2, anchor="w").pack(anchor="w")
             _klickbar(rf, lambda c=code: app.labor_oeffnen(c))
 
-        # Zwei Spalten: Handlungsbedarf | Datenhinweise
-        zeile = tk.Frame(p, bg=BG)
-        zeile.pack(fill="both", expand=True, padx=24, pady=(10, 20))
-        zeile.grid_columnconfigure(0, weight=1, uniform="sp")
-        zeile.grid_columnconfigure(1, weight=1, uniform="sp")
-        self._handlungsbedarf(zeile).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self._datenhinweise(zeile).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self._datenhinweise(p).pack(fill="x", padx=24, pady=(10, 20))
 
     def _liste_karte(self, parent, titel, untertitel):
         rf = RundFrame(parent, radius=16, pad=12)
@@ -93,25 +97,6 @@ class StartSeite(Seite):
                  wraplength=600).pack(side="left", fill="x", expand=True)
         tk.Label(z.inhalt, text=rechts, font=FONT_B, bg=BG, fg=farbe).pack(side="right", padx=(8, 4))
         _klickbar(z, befehl)
-
-    def _handlungsbedarf(self, parent):
-        app = self.app
-        rf = self._liste_karte(parent, "Labore unter Beobachtung",
-                               f"Score unter {config.GRENZE_FREIGEGEBEN} – und was am meisten Punkte kostet")
-        kritisch = sorted(((k["g"], code, k) for code, k in app.kennzahlen.items()
-                           if k["g"] is not None and k["g"] < config.GRENZE_FREIGEGEBEN))
-        if not kritisch:
-            tk.Label(rf.inhalt, text="Alle Labore sind freigegeben. 👍", font=FONT, bg=WHITE,
-                     fg=TEXT2).pack(anchor="w")
-        for g, code, k in kritisch:
-            grund = scoring.hauptgrund([e for _, e in app.store.eintraege(code)], app.benchmarks)
-            text = code
-            if grund:
-                text = (f"{code}  ·  {grund['name']}: {grund['text']}\n"
-                        f"Kostet ca. {grund['verlust']:.0f} Punkte.")
-            self._zeile(rf.inhalt, text, f"{g:.1f}  {scoring.status(g)[1]}", score_farbe(g),
-                        lambda c=code: app.labor_oeffnen(c))
-        return rf
 
     def _datenhinweise(self, parent):
         app = self.app

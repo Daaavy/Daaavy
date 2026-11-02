@@ -379,11 +379,12 @@ def level_eingabe(app, labor: str, n_level: int = 3) -> None:
 
 # ── Laborwechsel mit ungespeicherten Daten ────────────────────────────────────
 
-def frage_laborwechsel(app, ziel: str) -> str:
-    """-> 'verwerfen' | 'behalten' | 'abbrechen'"""
-    win = dialog(app, "Laborwechsel", "380x170")
+def frage_laborwechsel(app, von: str, ziel: str) -> str:
+    """Ungespeicherte Änderungen beim Laborwechsel. -> 'speichern' | 'verwerfen' | 'abbrechen'"""
+    win = dialog(app, "Nicht gespeichert", "440x180")
     ergebnis = tk.StringVar(value="abbrechen")
-    tk.Label(win, text=f"Zu Labor '{ziel}' wechseln.\nEingegebene Daten verwerfen oder behalten?",
+    tk.Label(win, text=f"Du hast bei {von} Werte eingegeben oder geändert,\n"
+                       f"die noch nicht gespeichert sind.",
              font=FONT, bg=WHITE, fg=TEXT, justify="center").pack(pady=(16, 12))
     bf = tk.Frame(win, bg=WHITE)
     bf.pack()
@@ -391,8 +392,8 @@ def frage_laborwechsel(app, ziel: str) -> str:
     def waehle(wert):
         ergebnis.set(wert)
         win.destroy()
+    button(bf, "Speichern", lambda: waehle("speichern")).pack(side="left", padx=6)
     button(bf, "Verwerfen", lambda: waehle("verwerfen"), art="gefahr").pack(side="left", padx=6)
-    button(bf, "Behalten", lambda: waehle("behalten")).pack(side="left", padx=6)
     button(bf, "Abbrechen", lambda: waehle("abbrechen"), art="sekundaer").pack(side="left", padx=6)
     win.wait_window()
     return ergebnis.get()
