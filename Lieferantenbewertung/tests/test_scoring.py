@@ -95,3 +95,28 @@ def test_plausibilitaet():
     assert "Eingangsdatum" in hinweise
     assert "behobene" in hinweise
     assert scoring.plausibilitaet(eintrag(qualitaet={"verworfen": 0, "gemessen": 4, "produkt": 4})) == []
+
+
+def test_hauptgrund_zuverlaessigkeit():
+    e = eintrag(qualitaet={"verworfen": 0, "gemessen": 40, "produkt": 40},
+                zuverlaessigkeit={"versand": "01.06.2026", "eingang": "31.07.2026"})
+    g = scoring.hauptgrund([e], {})
+    assert g["kategorie"] == "zuverlaessigkeit"
+    assert "nach 44 Werktagen" in g["text"]
+    assert g["verlust"] > 20
+
+
+def test_hauptgrund_nimmt_groessten_punktverlust_nicht_niedrigsten_wert():
+    # Zuverlässigkeit 70 (Gewicht 20) vs. Qualität 50 % verworfen (Gewicht 50):
+    # Qualität kostet mehr Punkte, obwohl ihr Score höher ist.
+    e = eintrag(qualitaet={"verworfen": 2, "gemessen": 4, "produkt": 4},
+                zuverlaessigkeit={"versand": "01.06.2026", "eingang": "24.06.2026"})
+    g = scoring.hauptgrund([e], {})
+    assert g["kategorie"] == "qualitaet"
+    assert "50 % der Analyten wurden verworfen" in g["text"]
+
+
+def test_hauptgrund_ohne_abzug():
+    e = eintrag(qualitaet={"verworfen": 0, "gemessen": 4, "produkt": 4})
+    assert scoring.hauptgrund([e], {}) is None
+    assert scoring.hauptgrund([], {}) is None

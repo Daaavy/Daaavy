@@ -281,13 +281,104 @@ def labor_kennzahlen(eintraege_je_labor: dict, benchmarks: dict, schema: str = "
     return ergebnis
 
 
-SCHWAECHSTE_NAMEN = {"q": "Qualität", "z": "Zuverlässigkeit", "k": "Kosten", "s": "Service"}
+# ── Begründung in Worten ──────────────────────────────────────────────────────
+
+KATEGORIE_KUERZEL = {"q": "qualitaet", "z": "zuverlaessigkeit", "k": "kosten", "s": "service"}
 
 
-def schwaechste_kategorie(kennzahl: dict):
-    """-> (Name, Wert) der schwächsten vorhandenen Kategorie oder (None, None)."""
-    werte = [(kennzahl[k], SCHWAECHSTE_NAMEN[k]) for k in "qzks" if kennzahl.get(k) is not None]
-    if not werte:
-        return None, None
-    wert, name = min(werte)
-    return name, wert
+def _summe(werte):
+    return sum(w for w in werte if w is not None)
+
+
+def _grund_qualitaet(eintraege):
+    verworfen = _summe(_zahl(e.get("qualitaet") or {}, "verworfen") for e in eintraege)
+    gemessen = _summe(_zahl(e.get("qualitaet") or {}, "gemessen") for e in eintraege)
+    gesamt = _summe(_zahl(e.get("qualitaet") or {}, "produkt") for e in eintraege)
+    if not gesamt:
+        return "Keine Angaben zur Analytenzahl."
+    anteil_verworfen = verworfen / gesamt * 100
+    anteil_gemessen = gemessen / gesamt * 100
+    # Welcher Teil kostet mehr Punkte?
+    verlust_fehler = config.QUALITAET_ANTEIL_FEHLERQUOTE * anteil_verworfen
+    verlust_auswahl = config.QUALITAET_ANTEIL_ANALYTAUSWAHL * (100 - anteil_gemessen)
+    if verlust_fehler >= verlust_auswahl:
+        return (f"{anteil_verworfen:.0f} % der Analyten wurden verworfen "
+                f"({verworfen:.0f} von {gesamt:.0f}).")
+    return (f"Es wurden nur {anteil_gemessen:.0f} % der Analyten gemessen "
+            f"({gemessen:.0f} von {gesamt:.0f}).")
+
+
+def _grund_zuverlaessigkeit(eintraege):
+    lieferungen = {}
+    for e in eintraege:
+        z = e.get("zuverlaessigkeit") or {}
+        tage = netto_tage(z.get("versand", ""), z.get("eingang", ""))
+        if tage is not None:
+            lieferungen[(z.get("versand"), z.get("eingang"))] = tage
+    if not lieferungen:
+        return "Keine gültigen Versand-/Eingangsdaten."
+    grenze = 14 + config.TERMINTREUE_PUFFER
+    zu_spaet = sum(1 for t in lieferungen.values() if t > grenze)
+    schnitt = sum(lieferungen.values()) / len(lieferungen)
+    n = len(lieferungen)
+    ziel = f"für volle Punkte höchstens {grenze}"
+    if n == 1:
+        return f"Die Ergebnisse kamen nach {schnitt:.0f} Werktagen ({ziel})."
+    verb = "kam" if zu_spaet == 1 else "kamen"
+    return (f"{zu_spaet} von {n} Lieferungen {verb} zu spät, im Schnitt nach {schnitt:.0f} Werktagen "
+            f"({ziel}).")
+
+
+def _grund_kosten(eintraege, benchmarks):
+    paare = []
+    for e in eintraege:
+        k = e.get("kosten") or {}
+        preis, bm = _zahl(k, "laborpreis"), benchmarks.get(e.get("produkt", ""))
+        if preis and bm and not k.get("kostenlos"):
+            paare.append((preis, bm))
+    if not paare:
+        return "Keine Preisangaben."
+    preis = sum(p for p, _ in paare) / len(paare)
+    bm = sum(b for _, b in paare) / len(paare)
+    return (f"Preis im Schnitt {(preis / bm - 1) * 100:.0f} % über dem Durchschnitt aller Labore "
+            f"({preis:.0f} € statt {bm:.0f} €).")
+
+
+def _grund_service(eintraege):
+    berichtet = _summe(_zahl(e.get("service") or {}, "berichtet") for e in eintraege)
+    behoben = _summe(_zahl(e.get("service") or {}, "behoben") for e in eintraege)
+    tage = [netto_tage((e.get("service") or {}).get("anfrage", ""), (e.get("service") or {}).get("antwort", ""))
+            for e in eintraege]
+    tage = [t for t in tage if t is not None]
+    teile = []
+    if berichtet:
+        teile.append(f"{behoben:.0f} von {berichtet:.0f} gemeldeten Fehlern wurden behoben")
+    if tage:
+        teile.append(f"Antwort im Schnitt nach {sum(tage) / len(tage):.0f} Werktagen (Ziel: höchstens 3)")
+    return ("; ".join(teile) + ".") if teile else "Keine Service-Angaben."
+
+
+def hauptgrund(eintraege: list, benchmarks: dict):
+    """Welche Kategorie kostet ein Labor die meisten Punkte – und warum?
+
+    -> {"kategorie", "name", "verlust" (Punkte im Gesamtscore), "text"} oder None
+    """
+    if not eintraege:
+        return None
+    kz = labor_kennzahlen({"_": eintraege}, benchmarks)["_"]
+    vorhanden = {KATEGORIE_KUERZEL[k]: kz[k] for k in "qzks" if kz[k] is not None}
+    gewichte = sum(config.GEWICHTE[k] for k in vorhanden)
+    if not gewichte:
+        return None
+    verluste = {k: config.GEWICHTE[k] / gewichte * (100 - v) for k, v in vorhanden.items()}
+    kategorie = max(verluste, key=verluste.get)
+    if verluste[kategorie] < 0.5:
+        return None
+    text = {
+        "qualitaet": lambda: _grund_qualitaet(eintraege),
+        "zuverlaessigkeit": lambda: _grund_zuverlaessigkeit(eintraege),
+        "kosten": lambda: _grund_kosten(eintraege, benchmarks),
+        "service": lambda: _grund_service(eintraege),
+    }[kategorie]()
+    return {"kategorie": kategorie, "name": config.KATEGORIE_NAMEN[kategorie],
+            "verlust": verluste[kategorie], "text": text}

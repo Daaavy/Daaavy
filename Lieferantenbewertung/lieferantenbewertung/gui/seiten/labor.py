@@ -126,9 +126,14 @@ class LaborSeite(tk.Frame):
         reihe.pack(fill="x", padx=24, pady=(4, 0))
         for label, key in (("Qualität", "q"), ("Zuverlässigkeit", "z"), ("Kosten", "k"), ("Service", "s")):
             kachel(reihe, label, fmt(k[key]), score_farbe(k[key]), breite=13)
-        name, wert = scoring.schwaechste_kategorie(k)
-        if name:
-            kachel(reihe, "Schwächste Kategorie", name, TEXT, unter=f"Ø {wert:.0f} Punkte", breite=18)
+        grund = scoring.hauptgrund(eintraege, self.app.benchmarks)
+        if grund:
+            rf = RundFrame(p, radius=16, pad=12)
+            rf.pack(fill="x", padx=24, pady=(10, 0))
+            tk.Label(rf.inhalt, text=f"Größter Punktabzug: {grund['name']}  (ca. {grund['verlust']:.0f} Punkte)",
+                     font=FONT_B, bg=WHITE, fg=TEXT, anchor="w").pack(fill="x")
+            tk.Label(rf.inhalt, text=grund["text"], font=FONT, bg=WHITE, fg=TEXT2, anchor="w",
+                     justify="left", wraplength=1000).pack(fill="x", pady=(2, 0))
 
         diagramme = tk.Frame(p, bg=BG)
         diagramme.pack(fill="x", padx=24, pady=(12, 0))

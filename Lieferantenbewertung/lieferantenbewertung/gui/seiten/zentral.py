@@ -90,21 +90,25 @@ class StartSeite(Seite):
         z = RundFrame(parent, bg=BG, rand=BG, radius=12, pad=6)
         z.pack(fill="x", pady=2)
         tk.Label(z.inhalt, text=links, font=FONT, bg=BG, fg=TEXT, anchor="w", justify="left",
-                 wraplength=420).pack(side="left", fill="x", expand=True)
+                 wraplength=600).pack(side="left", fill="x", expand=True)
         tk.Label(z.inhalt, text=rechts, font=FONT_B, bg=BG, fg=farbe).pack(side="right", padx=(8, 4))
         _klickbar(z, befehl)
 
     def _handlungsbedarf(self, parent):
         app = self.app
-        rf = self._liste_karte(parent, "Handlungsbedarf", "Labore mit Status Beobachtung oder Gesperrt")
+        rf = self._liste_karte(parent, "Labore unter Beobachtung",
+                               f"Score unter {config.GRENZE_FREIGEGEBEN} – und was am meisten Punkte kostet")
         kritisch = sorted(((k["g"], code, k) for code, k in app.kennzahlen.items()
                            if k["g"] is not None and k["g"] < config.GRENZE_FREIGEGEBEN))
         if not kritisch:
             tk.Label(rf.inhalt, text="Alle Labore sind freigegeben. 👍", font=FONT, bg=WHITE,
                      fg=TEXT2).pack(anchor="w")
         for g, code, k in kritisch:
-            name, wert = scoring.schwaechste_kategorie(k)
-            text = f"{code}   ·   schwächste Kategorie: {name} ({wert:.0f})" if name else code
+            grund = scoring.hauptgrund([e for _, e in app.store.eintraege(code)], app.benchmarks)
+            text = code
+            if grund:
+                text = (f"{code}  ·  {grund['name']}: {grund['text']}\n"
+                        f"Kostet ca. {grund['verlust']:.0f} Punkte.")
             self._zeile(rf.inhalt, text, f"{g:.1f}  {scoring.status(g)[1]}", score_farbe(g),
                         lambda c=code: app.labor_oeffnen(c))
         return rf
