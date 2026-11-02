@@ -190,7 +190,7 @@ class App(tk.Tk):
         menu.add_command(label=f"  {ziel}", state="disabled")
         menu.add_separator()
         menu.add_command(label="  Öffnen", command=lambda: self.labor_oeffnen(ziel))
-        menu.add_command(label="  Neue Bewertung", command=lambda: self.labor_oeffnen(ziel, reiter=ERFASSEN))
+        menu.add_command(label="  Bewertung erfassen", command=lambda: self.labor_oeffnen(ziel, reiter=ERFASSEN))
         menu.add_command(label="  Stammdaten bearbeiten", command=lambda: dialoge.labor_bearbeiten(self, ziel))
         menu.add_separator()
         menu.add_command(label="  Löschen", command=lambda: self.labor_loeschen(ziel))

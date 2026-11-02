@@ -39,7 +39,6 @@ class LaborSeite(tk.Frame):
         self.lbl_unter.pack(anchor="w")
         rechts = tk.Frame(kopf, bg=BG)
         rechts.pack(side="right")
-        button(rechts, "＋  Neue Bewertung", self.neue_bewertung).pack(side="right")
         score = tk.Frame(rechts, bg=BG)
         score.pack(side="right", padx=20)
         self.lbl_score = tk.Label(score, text="", font=("Segoe UI", 26, "bold"), bg=BG)

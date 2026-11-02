@@ -267,7 +267,7 @@ class Eingabe(tk.Frame):
                 self.app.store.eintrag_loeschen(self.bearbeitungs_id)
             eintrag["id"] = doppelt["id"]
         self.app.eintrag_ablegen(labor, eintrag)
-        self._bearbeitung_setzen(None)  # nächster Klick auf Speichern legt einen neuen Eintrag an
+        self.leeren()  # Formular für die nächste Bewertung leeren
         self.app.alles_aktualisieren()
         self.app.status(f"Gespeichert: {labor} · {eintrag['produkt']} {eintrag['konzentration']} · {eintrag['monat']}")
         if self.nach_speichern:
