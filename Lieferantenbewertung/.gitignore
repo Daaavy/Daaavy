@@ -1,0 +1,13 @@
+# Echte Daten und lokale Einstellungen gehören nicht ins Repository
+labordaten.json
+preise.json
+planung.json
+*.bak
+config.ini
+
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.spec

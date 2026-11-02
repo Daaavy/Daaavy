@@ -1,0 +1,4 @@
+matplotlib>=3.5
+reportlab>=3.6
+# Nur für die Access-Anbindung (Windows, Microsoft Access Driver nötig):
+pyodbc; sys_platform == "win32"
