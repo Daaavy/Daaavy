@@ -104,10 +104,13 @@ def combobox(parent, var, werte=(), breite=18, nur_lesen=True, bg=BG) -> RundCom
     return RundCombobox(parent, var, werte, breite, nur_lesen, fill=bg)
 
 
-def tabelle(parent, spalten: dict, hoehe=16) -> ttk.Treeview:
-    """spalten: {Name: (breite, ausrichtung)} – mit vertikaler Scrollbar."""
-    rf = RundFrame(parent, radius=16, pad=10, fuellen=True)
-    rf.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+def tabelle(parent, spalten: dict, hoehe=16, fest=False, padx=20) -> ttk.Treeview:
+    """spalten: {Name: (breite, ausrichtung)} – mit vertikaler Scrollbar.
+
+    fest=True: feste Höhe (für scrollbare Seiten), sonst füllt die Tabelle den Platz.
+    """
+    rf = RundFrame(parent, radius=16, pad=10, fuellen=not fest)
+    rf.pack(fill="x" if fest else "both", expand=not fest, padx=padx, pady=(0, 10))
     rahmen = rf.inhalt
     tree = ttk.Treeview(rahmen, columns=list(spalten), show="headings", height=hoehe)
     for name, (breite, anker) in spalten.items():
@@ -167,11 +170,46 @@ class ScrollFrame(tk.Frame):
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        self._canvas = canvas
+        self.after_idle(lambda: mausrad_installieren(self))
 
-        def _rad(event):
-            canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
-        self.inhalt.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _rad))
-        self.inhalt.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+    def _mausrad(self, schritte):
+        if self._canvas.yview() != (0.0, 1.0):
+            self._canvas.yview_scroll(schritte, "units")
+
+    def nach_oben(self):
+        self._canvas.yview_moveto(0)
+
+
+def mausrad_installieren(widget) -> None:
+    """Ein zentraler Mausrad-Handler: scrollt das Element unter dem Mauszeiger.
+
+    Tabellen und Textfelder scrollen selbst und werden übersprungen.
+    """
+    root = widget.winfo_toplevel()
+    if getattr(root, "_mausrad_aktiv", False):
+        return
+    root._mausrad_aktiv = True
+
+    def handler(event):
+        if getattr(event, "num", None) in (4, 5):
+            schritte = -1 if event.num == 4 else 1
+        else:
+            schritte = -1 if event.delta > 0 else 1
+        try:
+            w = event.widget.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError, AttributeError):
+            return
+        while w is not None:
+            if isinstance(w, (ttk.Treeview, tk.Text, tk.Listbox)):
+                return
+            if hasattr(w, "_mausrad"):
+                w._mausrad(schritte)
+                return
+            w = w.master
+    root.bind_all("<MouseWheel>", handler)
+    root.bind_all("<Button-4>", handler)
+    root.bind_all("<Button-5>", handler)
 
 
 # ── Kalender ──────────────────────────────────────────────────────────────────

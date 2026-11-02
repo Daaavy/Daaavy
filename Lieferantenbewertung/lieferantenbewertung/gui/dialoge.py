@@ -4,10 +4,9 @@ from __future__ import annotations
 import copy
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import messagebox
 
 from .. import labor_db, scoring
-from .. import pdf_export as pdf
 from ..storage import neue_id
 from .widgets import (BG, BG2, BORDER, FONT, FONT_B, FONT_SM, TEXT, TEXT2, WHITE,
                       ScrollFrame, button, combobox, dialog, eingabe, zeile)
@@ -62,50 +61,6 @@ def labor_anlegen(app) -> None:
 
 
 # ── Labor-Details / Bearbeiten (nur mit Access) ───────────────────────────────
-
-def labor_details(app, laborcode: str) -> None:
-    win = dialog(app, f"Details – {laborcode}", "520x480", modal=False)
-    inhalt = tk.Frame(win, bg=WHITE)
-    inhalt.pack(fill="both", expand=True, padx=20, pady=16)
-
-    def zeige(label, wert):
-        f = tk.Frame(inhalt, bg=WHITE)
-        f.pack(fill="x", pady=3)
-        tk.Label(f, text=label, font=FONT_SM, bg=WHITE, fg=TEXT2, width=18, anchor="w").pack(side="left")
-        tk.Label(f, text=wert or "–", font=FONT, bg=WHITE, fg=TEXT, anchor="w",
-                 wraplength=320, justify="left").pack(side="left")
-
-    eintraege = app.store.daten.get(laborcode, [])
-    zeige("Laborcode", laborcode)
-    zeige("Einträge", str(len(eintraege)))
-    zeige("Produkte", ", ".join(app.store.produkte(laborcode)))
-
-    lab, aps = None, []
-    if app.db_ok:
-        try:
-            lab = labor_db.labor_nach_code(laborcode)
-            aps = labor_db.aps_fuer_labor(lab["LaborID"]) if lab else []
-        except Exception as err:
-            zeige("Access-DB", f"Fehler: {err}")
-    if lab:
-        tk.Label(inhalt, text="Stammdaten", font=FONT_B, bg=WHITE, fg=TEXT).pack(anchor="w", pady=(12, 4))
-        for feld in ("Laborname", "Adresse", "Telefon", "Notiz"):
-            zeige(feld, lab.get(feld))
-        if aps:
-            tk.Label(inhalt, text="Ansprechpartner", font=FONT_B, bg=WHITE, fg=TEXT).pack(anchor="w", pady=(12, 4))
-            for ap in aps:
-                af = tk.Frame(inhalt, bg=BG2, highlightthickness=1, highlightbackground=BORDER)
-                af.pack(fill="x", pady=3)
-                tk.Label(af, text=f"{ap['Name']}  ·  {ap.get('Funktion') or ''}", font=FONT_B,
-                         bg=BG2, fg=TEXT, padx=10).pack(anchor="w", pady=(4, 0))
-                tk.Label(af, text=f"{ap.get('Email') or ''}   {ap.get('Telefon') or ''}", font=FONT_SM,
-                         bg=BG2, fg=TEXT2, padx=10).pack(anchor="w", pady=(0, 4))
-    elif app.db_ok:
-        tk.Label(inhalt, text="Keine Stammdaten in der Access-DB.", font=FONT_SM,
-                 bg=WHITE, fg=TEXT2).pack(anchor="w", pady=8)
-
-    button(win, "Schließen", win.destroy, art="sekundaer").pack(side="right", padx=20, pady=12)
-
 
 def labor_bearbeiten(app, laborcode: str) -> None:
     if not app.db_ok:
@@ -408,44 +363,6 @@ def level_eingabe(app, labor: str, n_level: int = 3) -> None:
         app.status(f"{len(eintraege)} Level für {labor} gespeichert.")
 
     knopfleiste(win, "Alle speichern", alle_speichern, win.destroy)
-
-
-# ── PDF-Export ────────────────────────────────────────────────────────────────
-
-def pdf_export(app, modus: str = "uebersicht") -> None:
-    titel = "Übersicht exportieren" if modus == "uebersicht" else "Detail + Berechnung exportieren"
-    win = dialog(app, titel, "400x230")
-    gf = tk.Frame(win, bg=WHITE)
-    gf.pack(fill="x", padx=20, pady=16)
-    jahre = app.store.jahre() or [str(datetime.now().year)]
-    jahr = tk.StringVar(value=jahre[0])
-    produkt = tk.StringVar(value="Alle")
-    for label, var, werte in (("Jahr", jahr, jahre), ("Produkt", produkt, ["Alle"] + app.store.produkte())):
-        r = tk.Frame(gf, bg=WHITE)
-        r.pack(fill="x", pady=4)
-        tk.Label(r, text=label, font=FONT, bg=WHITE, fg=TEXT2, width=12, anchor="w").pack(side="left")
-        combobox(r, var, werte, 22).pack(side="left")
-
-    def exportieren():
-        art = "Übersicht" if modus == "uebersicht" else "Detail"
-        pfad = filedialog.asksaveasfilename(
-            parent=win, title="PDF speichern", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
-            initialfile=f"Lieferantenbewertung_{art}_{jahr.get()}.pdf")
-        if not pfad:
-            return
-        try:
-            funktion = pdf.erstelle_uebersicht if modus == "uebersicht" else pdf.erstelle_detail
-            funktion(pfad, app.store.daten, jahr.get(), produkt.get())
-        except ImportError:
-            messagebox.showerror("Fehler", "Für den PDF-Export wird das Paket 'reportlab' benötigt.", parent=win)
-            return
-        except Exception as err:
-            messagebox.showerror("Fehler", str(err), parent=win)
-            return
-        win.destroy()
-        app.status(f"PDF gespeichert: {pfad}")
-
-    knopfleiste(win, "Exportieren", exportieren, win.destroy)
 
 
 # ── Laborwechsel mit ungespeicherten Daten ────────────────────────────────────

@@ -28,25 +28,7 @@ def _grenzlinien(ax, horizontal=True):
         linie(wert, color=farbe, linestyle=(0, (4, 3)), linewidth=1.2, alpha=0.7, zorder=2)
 
 
-def labor_kennzahlen(eintraege_je_labor: dict, benchmarks: dict, schema="linear") -> dict:
-    """{labor: [eintrag, ...]} -> {labor: {q, z, k, s, g, verlauf}}"""
-    ergebnis = {}
-    for labor, eintraege in eintraege_je_labor.items():
-        eintraege = sorted(eintraege, key=lambda e: e.get("monat", ""))
-        scores = [scoring.berechne_scores(e, benchmarks) for e in eintraege]
-        # Verlauf: Durchschnitt je Monat (mehrere Level im selben Monat zusammenfassen)
-        je_monat = {}
-        for e, s in zip(eintraege, scores):
-            je_monat.setdefault(e.get("monat", ""), []).append(s.gesamt)
-        ergebnis[labor] = {
-            "q": scoring.durchschnitt(s.qualitaet for s in scores),
-            "z": scoring.durchschnitt(s.zuverlaessigkeit for s in scores),
-            "k": scoring.durchschnitt(s.kosten for s in scores),
-            "s": scoring.durchschnitt(s.service for s in scores),
-            "g": scoring.gewichteter_schnitt([s.gesamt for s in scores], schema),
-            "verlauf": {m: scoring.durchschnitt(v) for m, v in je_monat.items()},
-        }
-    return ergebnis
+labor_kennzahlen = scoring.labor_kennzahlen  # Kompatibilität
 
 
 def score_diagramm(kennzahlen: dict) -> Figure:
@@ -182,4 +164,63 @@ def preisentwicklung_diagramm(verlauf: dict, breite_zoll: float = 10) -> Figure:
     if len(verlauf) > 1:
         ax.legend(fontsize=7.5, frameon=False, loc="upper left", bbox_to_anchor=(1.08, 1.02),
                   ncol=2 if len(verlauf) > 14 else 1)
+    return fig
+
+
+def labor_verlauf_diagramm(kennzahl: dict, breite_zoll: float = 7) -> Figure:
+    """Gesamtscore eines Labors je Monat (dick) mit den vier Kategorien (dünn)."""
+    fig = Figure(figsize=(breite_zoll, 3.0), facecolor="#FFFFFF")
+    ax = fig.add_subplot()
+    fig.subplots_adjust(left=0.08, right=0.80, top=0.86, bottom=0.2)
+    _achse_stylen(ax)
+    monate = sorted(m for m in kennzahl["monate"] if m)
+    xs = range(len(monate))
+    linien = (("gesamt", "Gesamt", "#1A1A1A", 2.6), ("qualitaet", "Qualität", PALETTE[0], 1.4),
+              ("zuverlaessigkeit", "Zuverl.", PALETTE[1], 1.4), ("kosten", "Kosten", PALETTE[2], 1.4),
+              ("service", "Service", PALETTE[4], 1.4))
+    for key, name, farbe, staerke in linien:
+        punkte = [(x, kennzahl["monate"][m][key]) for x, m in zip(xs, monate)
+                  if kennzahl["monate"][m][key] is not None]
+        if not punkte:
+            continue
+        px, py = zip(*punkte)
+        ax.plot(px, py, color=farbe, linewidth=staerke, marker="o", markersize=5 if key == "gesamt" else 3,
+                label=name, zorder=4 if key == "gesamt" else 3, alpha=1 if key == "gesamt" else 0.75)
+    _grenzlinien(ax)
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(monate, rotation=30, ha="right", fontsize=8)
+    ax.set_xlim(-0.5, max(len(monate) - 0.5, 0.5))
+    ax.set_ylim(0, 105)
+    ax.set_title("Verlauf je Monat", fontsize=10, fontweight="bold", loc="left", pad=8)
+    ax.legend(fontsize=8, frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    return fig
+
+
+def kategorie_diagramm(kennzahl: dict, breite_zoll: float = 5) -> Figure:
+    """Durchschnitt der vier Kategorien eines Labors als waagerechte Balken."""
+    fig = Figure(figsize=(breite_zoll, 3.0), facecolor="#FFFFFF")
+    ax = fig.add_subplot()
+    fig.subplots_adjust(left=0.30, right=0.94, top=0.86, bottom=0.12)
+    _achse_stylen(ax, "x")
+    kats = [("qualitaet", "Qualität"), ("zuverlaessigkeit", "Zuverlässigkeit"),
+            ("kosten", "Kosten"), ("service", "Service")]
+    r = 0.55 * 0.42
+    for i, (key, name) in enumerate(kats):
+        wert = kennzahl[key[0]]
+        v = wert or 0
+        ax.add_patch(FancyBboxPatch((0, i - 0.275), 100, 0.55, boxstyle=f"round,pad=0,rounding_size={r}",
+                                    facecolor="#EEF3F9", edgecolor="none", zorder=1))
+        if v > 0:
+            ax.add_patch(FancyBboxPatch((0, i - 0.275), v, 0.55, boxstyle=f"round,pad=0,rounding_size={r}",
+                                        facecolor=STATUS_FARBE[scoring.status(wert)[0]], edgecolor="none",
+                                        zorder=3))
+        ax.text(min(v + 2, 102), i, f"{v:.0f}" if wert is not None else "keine Daten", va="center",
+                fontsize=9, fontweight="bold" if wert is not None else "normal",
+                color="#2C2C2A" if wert is not None else TEXT2)
+    ax.set_xlim(0, 118)
+    ax.set_ylim(3.6, -0.6)
+    ax.set_yticks(range(4))
+    ax.set_yticklabels([n for _, n in kats], fontsize=9)
+    ax.set_xticks([])
+    ax.set_title("Kategorien (Durchschnitt)", fontsize=10, fontweight="bold", loc="left", pad=8)
     return fig

@@ -245,3 +245,49 @@ def plausibilitaet(eintrag: dict) -> list:
     if berichtet is not None and behoben is not None and behoben > berichtet:
         hinweise.append("Mehr behobene als berichtete Fehler.")
     return hinweise
+
+
+def labor_kennzahlen(eintraege_je_labor: dict, benchmarks: dict, schema: str = "linear") -> dict:
+    """{labor: [eintrag, …]} -> {labor: Kennzahlen}
+
+    Kennzahlen: q, z, k, s (Durchschnitt), g (gewichteter Gesamtscore, neuere
+    Werte zählen mehr), n (Anzahl), letzter_monat, verlauf {monat: gesamt} und
+    monate {monat: {gesamt, qualitaet, …}} (Monatsdurchschnitte).
+    """
+    ergebnis = {}
+    for labor, eintraege in eintraege_je_labor.items():
+        eintraege = sorted(eintraege, key=lambda e: e.get("monat", ""))
+        scores = [berechne_scores(e, benchmarks) for e in eintraege]
+        je_monat = {}
+        for e, s in zip(eintraege, scores):
+            je_monat.setdefault(e.get("monat", ""), []).append(s)
+        monate = {
+            m: {"gesamt": durchschnitt(s.gesamt for s in liste),
+                **{k: durchschnitt(getattr(s, k) for s in liste)
+                   for k in ("qualitaet", "zuverlaessigkeit", "kosten", "service")}}
+            for m, liste in je_monat.items()
+        }
+        ergebnis[labor] = {
+            "q": durchschnitt(s.qualitaet for s in scores),
+            "z": durchschnitt(s.zuverlaessigkeit for s in scores),
+            "k": durchschnitt(s.kosten for s in scores),
+            "s": durchschnitt(s.service for s in scores),
+            "g": gewichteter_schnitt([s.gesamt for s in scores], schema),
+            "n": len(eintraege),
+            "letzter_monat": eintraege[-1].get("monat", "") if eintraege else "",
+            "verlauf": {m: v["gesamt"] for m, v in monate.items()},
+            "monate": monate,
+        }
+    return ergebnis
+
+
+SCHWAECHSTE_NAMEN = {"q": "Qualität", "z": "Zuverlässigkeit", "k": "Kosten", "s": "Service"}
+
+
+def schwaechste_kategorie(kennzahl: dict):
+    """-> (Name, Wert) der schwächsten vorhandenen Kategorie oder (None, None)."""
+    werte = [(kennzahl[k], SCHWAECHSTE_NAMEN[k]) for k in "qzks" if kennzahl.get(k) is not None]
+    if not werte:
+        return None, None
+    wert, name = min(werte)
+    return name, wert

@@ -241,8 +241,6 @@ class RundListe(tk.Canvas):
         self.bind("<Leave>", lambda e: self._hover_setzen(None))
         self.bind("<Button-1>", lambda e: self._klick(e, self._auswahl))
         self.bind("<Button-3>", lambda e: self._klick(e, self._kontext))
-        self.bind("<Enter>", lambda e: self.bind_all("<MouseWheel>", self._rad))
-        self.bind("<Leave>", lambda e: self.unbind_all("<MouseWheel>"), add="+")
 
     def setze(self, zeilen):
         self.zeilen = list(zeilen)
@@ -277,8 +275,9 @@ class RundListe(tk.Canvas):
         if i is not None and self.zeilen[i][0] and callback:
             callback(self.zeilen[i][0], e)
 
-    def _rad(self, e):
-        self.yview_scroll(-1 if e.delta > 0 else 1, "units")
+    def _mausrad(self, schritte):
+        if len(self.zeilen) * self.ZEILE > self.winfo_height():
+            self.yview_scroll(schritte, "units")
 
     def _zeichnen(self):
         self.delete("all")

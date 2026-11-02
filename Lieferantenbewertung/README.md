@@ -42,6 +42,31 @@ python migration_json_to_access.py
 pyinstaller --noconsole --onefile --name Lieferantenbewertung start.py
 ```
 
+## Bedienung
+
+Links ist die Navigation, sie hat zwei Bereiche:
+
+**Übersicht** – zentrale Seiten, die alle Labore betreffen:
+
+| Seite | Inhalt |
+|---|---|
+| Start | Kennzahlen, Ampel aller Labore, Handlungsbedarf (Labore unter 75 mit schwächster Kategorie) und Datenhinweise (unstimmige Eingaben, Klick öffnet den Eintrag) |
+| Vergleich | Rangliste aller Labore und Vergleichsdiagramme, filterbar nach Jahr und Produkt |
+| Alle Bewertungen | Alle Einträge mit Filtern nach Labor, Produkt, Jahr und Status |
+| Preise | Preisentwicklung aller Labore, Preise manuell pflegen |
+| Berichte | PDF-Export und Speicherort der Daten |
+
+**Labore** – ein Klick öffnet die Laborseite. Dort gibt es nur, was dieses
+eine Labor betrifft:
+
+| Reiter | Inhalt |
+|---|---|
+| Überblick | Kategorien, Verlauf je Monat, Auswertung nach Produkt, Datenhinweise |
+| Bewertung erfassen | Eingabemaske (auch mehrere Level auf einmal) |
+| Einträge | Alle Bewertungen des Labors: bearbeiten, verschieben, löschen |
+| Preise | Preisentwicklung dieses Labors |
+| Stammdaten | Name, Adresse, Ansprechpartner (mit Access), Labor löschen |
+
 ## Was ist neu gegenüber der alten Version?
 
 ### Behobene Fehler
@@ -86,7 +111,11 @@ lieferantenbewertung/
   labor_db.py    Access-Anbindung
   charts.py      Diagramme
   pdf_export.py  PDF-Berichte
-  gui/           Oberfläche (tkinter)
+  gui/
+    app.py       Hauptfenster mit Navigation
+    seiten/      zentral.py (Start, Vergleich, …), labor.py (Laborseite), eingabe.py
+    rund.py      runde Buttons, Karten, Eingabefelder
+    dialoge.py   Dialogfenster
 tests/           automatische Tests:  python -m pytest
 ```
 
