@@ -249,7 +249,17 @@ def level_eingabe(app, labor: str, n_level: int = 3) -> None:
     kf = tk.Frame(rechts, bg=WHITE)
     kf.pack(fill="x", pady=4)
     tk.Label(kf, text="Laborpreis (EUR)", font=FONT_SM, bg=WHITE, fg=TEXT2, width=28, anchor="w").pack(side="left")
-    eingabe(kf, v["k_laborpreis"], 10).pack(side="left", ipady=4, padx=(0, 8))
+    e_preis = eingabe(kf, v["k_laborpreis"], 10)
+    e_preis.pack(side="left", ipady=4, padx=(0, 8))
+
+    def hinterlegt():
+        return app.preise.letzter_preis(labor, v["produkt"].get().strip())
+
+    def platzhalter_setzen(*_):
+        p = hinterlegt()
+        e_preis.platzhalter(f"{p:.2f}" if p is not None else "")
+    v["produkt"].trace_add("write", platzhalter_setzen)
+    platzhalter_setzen()
     tk.Checkbutton(kf, text="Kostenlos", variable=kostenlos, font=FONT_SM, bg=WHITE,
                    activebackground=WHITE, highlightthickness=0, bd=0).pack(side="left")
     zeile(rechts, "Berichtete Fehler", v["s_berichtet"], 6)
@@ -317,7 +327,9 @@ def level_eingabe(app, labor: str, n_level: int = 3) -> None:
                 "produkt": produkt,
                 "zuverlaessigkeit": {"versand": v["z_versand"].get().strip(),
                                      "eingang": v["z_eingang"].get().strip()},
-                "kosten": {"laborpreis": 0.0 if kostenlos.get() else zahl("Laborpreis", v["k_laborpreis"]),
+                "kosten": {"laborpreis": 0.0 if kostenlos.get() else
+                           (zahl("Laborpreis", v["k_laborpreis"]) if v["k_laborpreis"].get().strip()
+                            else hinterlegt()),
                            "kostenlos": kostenlos.get()},
                 "service": {"berichtet": zahl("Berichtete Fehler", v["s_berichtet"]),
                             "behoben": zahl("Behobene Fehler", v["s_behoben"]),

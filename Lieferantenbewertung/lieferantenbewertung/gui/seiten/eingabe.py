@@ -108,6 +108,9 @@ class Eingabe(tk.Frame):
 
         c = karte(rechts, f"Kosten (Gewicht {g['kosten']})")
         self.e_preis = feld(c, "Laborpreis (EUR)", f["k_laborpreis"])
+        self.lbl_preis_hinweis = tk.Label(c, text="", font=FONT_SM, bg=WHITE, fg=TEXT2, anchor="w",
+                                          justify="left", wraplength=300)
+        self.lbl_preis_hinweis.pack(fill="x", padx=12)
         tk.Checkbutton(c, text="Kostenloses Labor (Score = 100 %)", variable=self.k_kostenlos,
                        font=FONT_SM, bg=WHITE, fg=TEXT2, activebackground=WHITE, cursor="hand2",
                        highlightthickness=0, bd=0, command=self._kostenlos_umschalten
@@ -157,13 +160,18 @@ class Eingabe(tk.Frame):
         else:
             self.e_preis.config(state="normal")
 
+    def hinterlegter_preis(self):
+        """Zuletzt hinterlegter Preis für Labor + Produkt (oder None)."""
+        labor, produkt = self.labor_fn(), self.formular["produkt"].get().strip()
+        return self.app.preise.letzter_preis(labor, produkt) if labor and produkt else None
+
     def preis_vorschlagen(self):
-        labor = self.labor_fn()
-        produkt = self.formular["produkt"].get().strip()
-        if labor and produkt and not self.formular["k_laborpreis"].get().strip():
-            preis = self.app.preise.letzter_preis(labor, produkt)
-            if preis is not None:
-                self.formular["k_laborpreis"].set(f"{preis:.2f}")
+        """Zeigt den hinterlegten Preis grau im leeren Preisfeld an."""
+        preis = self.hinterlegter_preis()
+        self.e_preis.platzhalter(f"{preis:.2f}" if preis is not None else "")
+        self.lbl_preis_hinweis.config(
+            text="Grau = hinterlegter Preis. Er wird übernommen, wenn du nichts einträgst."
+            if preis is not None else "")
 
     # ── Formular <-> Eintrag ──────────────────────────────────────────────
     def eintrag(self) -> dict:
@@ -183,7 +191,8 @@ class Eingabe(tk.Frame):
             "pruefnummer": f["pruefnummer"].get().strip(),
             "qualitaet": {"verworfen": z["q_verworfen"], "gemessen": z["q_gemessen"], "produkt": z["q_produkt"]},
             "zuverlaessigkeit": {"versand": f["z_versand"].get().strip(), "eingang": f["z_eingang"].get().strip()},
-            "kosten": {"laborpreis": 0.0 if self.k_kostenlos.get() else z["k_laborpreis"],
+            "kosten": {"laborpreis": 0.0 if self.k_kostenlos.get() else
+                       (z["k_laborpreis"] if z["k_laborpreis"] is not None else self.hinterlegter_preis()),
                        "kostenlos": self.k_kostenlos.get()},
             "service": {"berichtet": z["s_berichtet"], "behoben": z["s_behoben"],
                         "anfrage": f["s_anfrage"].get().strip(), "antwort": f["s_antwort"].get().strip(),

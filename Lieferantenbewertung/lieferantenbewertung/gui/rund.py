@@ -201,6 +201,26 @@ class RundEingabe(_Gerahmt):
                      highlightthickness=0, bg=fill, disabledbackground=fill, fg=F.TEXT,
                      insertbackground=F.TEXT)
         self._rahmen_init(parent, e, fill=fill)
+        self._var = var
+        self._platzhalter = tk.Label(e, text="", font=font or F.FONT, bg=fill, fg="#A0A8B4",
+                                     bd=0, padx=0, cursor="xterm")
+        self._platzhalter.bind("<Button-1>", lambda ev: e.focus_set())
+        var.trace_add("write", lambda *_: self._platzhalter_zeigen())
+
+    def platzhalter(self, text: str) -> None:
+        """Grauer Text, der nur bei leerem Feld sichtbar ist (wird nicht in die Variable geschrieben)."""
+        self._platzhalter.config(text=text)
+        self._platzhalter_zeigen()
+
+    @property
+    def platzhalter_text(self) -> str:
+        return self._platzhalter.cget("text")
+
+    def _platzhalter_zeigen(self):
+        if self._platzhalter.cget("text") and not self._var.get():
+            self._platzhalter.place(x=1, rely=0.5, anchor="w")
+        else:
+            self._platzhalter.place_forget()
 
 
 class RundCombobox(_Gerahmt):

@@ -101,6 +101,7 @@ class LaborSeite(tk.Frame):
         name = self.app.labor_name(self.code)
         self.lbl_unter.config(text=f"{name}  ·  {unter}" if name else unter)
         self.lbl_score.config(text=fmt(k["g"]), fg=score_farbe(k["g"]))
+        self.eingabe.preis_vorschlagen()
         self.eingabe.vorschau()
         self._reiter_aktualisieren(self.reiter.aktiv)
 
