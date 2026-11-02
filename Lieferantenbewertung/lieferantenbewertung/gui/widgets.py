@@ -8,24 +8,9 @@ from tkinter import ttk
 
 from .. import config
 
-# ── Farben & Schriften ────────────────────────────────────────────────────────
-BG = "#F7F9FC"
-BG2 = "#EEF3F9"
-WHITE = "#FFFFFF"
-ACCENT = "#4A7FC1"
-TEXT = "#1A1A1A"
-TEXT2 = "#888888"
-BORDER = "#E2E8F0"
-DANGER = "#B04A4A"
-
-FONT = ("Segoe UI", 10)
-FONT_B = ("Segoe UI", 10, "bold")
-FONT_H = ("Segoe UI", 16, "bold")
-FONT_SM = ("Segoe UI", 9)
-FONT_XS = ("Segoe UI", 8)
-
-STATUS_ZEILENFARBEN = {"ok": "#E0EDF8", "warn": "#FFF4E0", "bad": "#F5E1E1", "none": WHITE}
-STATUS_TEXTFARBEN = {"ok": "#2E86AB", "warn": "#C08020", "bad": "#B04A4A", "none": TEXT2}
+from .farben import (ACCENT, BG, BG2, BORDER, DANGER, FONT, FONT_B, FONT_H, FONT_SM,  # noqa: F401
+                     FONT_XS, STATUS_TEXTFARBEN, STATUS_ZEILENFARBEN, TEXT, TEXT2, WHITE)
+from .rund import RundButton, RundCombobox, RundEingabe, RundFrame, combobox_stil
 
 MONATE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
           "August", "September", "Oktober", "November", "Dezember"]
@@ -41,9 +26,21 @@ def ttk_stil(root: tk.Misc) -> None:
     style.configure("TNotebook.Tab", font=FONT_SM, padding=[14, 8], background=WHITE,
                     foreground=TEXT2, borderwidth=0)
     style.map("TNotebook.Tab", background=[("selected", WHITE)], foreground=[("selected", ACCENT)])
-    style.configure("Treeview", font=FONT, rowheight=28, background=WHITE,
-                    fieldbackground=WHITE, foreground=TEXT)
-    style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background=BG2, foreground=TEXT2)
+    # Reiter werden als eigene runde Buttons gezeichnet -> ttk-Reiter ausblenden
+    style.layout("Ohne.TNotebook.Tab", [])
+    style.layout("Ohne.TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+    style.configure("Ohne.TNotebook", background=BG, borderwidth=0, tabmargins=0,
+                    bordercolor=BG, lightcolor=BG, darkcolor=BG)
+    style.configure("Treeview", font=FONT, rowheight=30, background=WHITE, borderwidth=0,
+                    fieldbackground=WHITE, foreground=TEXT, relief="flat")
+    style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+    style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background=WHITE,
+                    foreground=TEXT2, relief="flat", borderwidth=0, padding=(4, 6))
+    style.map("Treeview.Heading", background=[("active", BG2)])
+    style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", WHITE)])
+    style.configure("Vertical.TScrollbar", troughcolor=WHITE, background=BG2, bordercolor=WHITE,
+                    lightcolor=BG2, darkcolor=BG2, arrowcolor=TEXT2, relief="flat", gripcount=0)
+    combobox_stil(style)
     style.configure("TCombobox", fieldbackground=WHITE, background=WHITE, foreground=TEXT,
                     bordercolor=BORDER, arrowcolor=ACCENT, padding=(6, 4))
     style.map("TCombobox", fieldbackground=[("readonly", WHITE)],
@@ -57,21 +54,13 @@ def ttk_stil(root: tk.Misc) -> None:
 
 # ── Buttons & Eingaben ────────────────────────────────────────────────────────
 
-def button(parent, text, command, art="primaer", **kw) -> tk.Button:
+def button(parent, text, command, art="primaer", **kw) -> RundButton:
     """art: primaer (blau) | sekundaer (weiß mit Rahmen) | gefahr"""
-    if art == "primaer":
-        opts = dict(bg=ACCENT, fg=WHITE, font=FONT_B, activebackground="#3A6BAA", activeforeground=WHITE)
-    else:
-        opts = dict(bg=WHITE, fg=DANGER if art == "gefahr" else TEXT2, font=FONT,
-                    highlightthickness=1, highlightbackground=BORDER, activebackground=BG2)
-    opts.update(relief="flat", padx=14, pady=6, cursor="hand2", bd=0)
-    opts.update(kw)
-    return tk.Button(parent, text=text, command=command, **opts)
+    return RundButton(parent, text, command, art=art, **kw)
 
 
-def eingabe(parent, var, breite=14, bg=BG) -> tk.Entry:
-    return tk.Entry(parent, textvariable=var, font=FONT, width=breite, relief="flat",
-                    highlightthickness=1, highlightcolor=ACCENT, highlightbackground=BORDER, bg=bg)
+def eingabe(parent, var, breite=14, bg=BG) -> RundEingabe:
+    return RundEingabe(parent, var, breite, fill=bg)
 
 
 def feld(parent, label, var, hinweis="", breite=14, datum=False, bg=WHITE) -> tk.Entry:
@@ -82,7 +71,7 @@ def feld(parent, label, var, hinweis="", breite=14, datum=False, bg=WHITE) -> tk
     zeile = tk.Frame(f, bg=bg)
     zeile.pack(fill="x", pady=(2, 0))
     e = eingabe(zeile, var, breite, bg=BG)
-    e.pack(side="left", ipady=4)
+    e.pack(side="left", ipady=2)
     if datum:
         kalender_button(zeile, var).pack(side="left", padx=4)
     if hinweis:
@@ -96,29 +85,30 @@ def zeile(parent, label, var, breite=12, datum=False, label_breite=28, bg=WHITE)
     f.pack(fill="x", pady=4)
     tk.Label(f, text=label, font=FONT_SM, bg=bg, fg=TEXT2, width=label_breite, anchor="w").pack(side="left")
     e = eingabe(f, var, breite)
-    e.pack(side="left", ipady=4)
+    e.pack(side="left", ipady=2)
     if datum:
         kalender_button(f, var).pack(side="left", padx=4)
     return e
 
 
 def karte(parent, titel) -> tk.Frame:
-    f = tk.Frame(parent, bg=WHITE, highlightthickness=1, highlightbackground=BORDER)
-    f.pack(fill="x", pady=(0, 8))
-    tk.Label(f, text=titel, font=FONT_SM, bg=WHITE, fg=TEXT2, anchor="w", padx=12, pady=6).pack(fill="x")
-    tk.Frame(f, bg=BORDER, height=1).pack(fill="x")
+    """Weiße Karte mit runden Ecken und Titel; gibt den Inhaltsbereich zurück."""
+    rf = RundFrame(parent, radius=16, pad=6)
+    rf.pack(fill="x", pady=(0, 10))
+    f = rf.inhalt
+    tk.Label(f, text=titel, font=FONT_SM, bg=WHITE, fg=TEXT2, anchor="w", padx=8, pady=4).pack(fill="x")
     return f
 
 
-def combobox(parent, var, werte=(), breite=18, nur_lesen=True) -> ttk.Combobox:
-    return ttk.Combobox(parent, textvariable=var, values=list(werte), width=breite, font=FONT,
-                        state="readonly" if nur_lesen else "normal")
+def combobox(parent, var, werte=(), breite=18, nur_lesen=True, bg=BG) -> RundCombobox:
+    return RundCombobox(parent, var, werte, breite, nur_lesen, fill=bg)
 
 
 def tabelle(parent, spalten: dict, hoehe=16) -> ttk.Treeview:
     """spalten: {Name: (breite, ausrichtung)} – mit vertikaler Scrollbar."""
-    rahmen = tk.Frame(parent, bg=BG)
-    rahmen.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+    rf = RundFrame(parent, radius=16, pad=10, fuellen=True)
+    rf.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+    rahmen = rf.inhalt
     tree = ttk.Treeview(rahmen, columns=list(spalten), show="headings", height=hoehe)
     for name, (breite, anker) in spalten.items():
         tree.heading(name, text=name)
@@ -186,10 +176,9 @@ class ScrollFrame(tk.Frame):
 
 # ── Kalender ──────────────────────────────────────────────────────────────────
 
-def kalender_button(parent, var) -> tk.Button:
-    return tk.Button(parent, text="📅", font=FONT_SM, bg=BG2, fg=TEXT, relief="flat",
-                     padx=4, pady=1, cursor="hand2",
-                     command=lambda: kalender_popup(parent, var))
+def kalender_button(parent, var) -> RundButton:
+    return RundButton(parent, "📅", lambda: kalender_popup(parent, var), art="sekundaer",
+                      font=FONT_SM, padx=7, pady=4)
 
 
 def kalender_popup(parent, var: tk.StringVar) -> None:
@@ -238,19 +227,16 @@ def kalender_popup(parent, var: tk.StringVar) -> None:
                     continue
                 ist_gewaehlt = gewaehlt is not None and (j, m, tag) == (gewaehlt.year, gewaehlt.month, gewaehlt.day)
                 ist_heute = (j, m, tag) == (heute.year, heute.month, heute.day)
-                tk.Button(raster, text=str(tag), font=FONT_B if ist_heute else FONT_SM,
-                          bg=ACCENT if ist_gewaehlt else WHITE, fg=WHITE if ist_gewaehlt else TEXT,
-                          relief="flat", width=3, cursor="hand2",
-                          command=lambda t=tag: waehlen(t)).grid(row=r, column=spalte, padx=1, pady=1)
+                RundButton(raster, str(tag), lambda t=tag: waehlen(t),
+                           art="tag_aktiv" if ist_gewaehlt else "tag",
+                           font=FONT_B if ist_heute else FONT_SM, breite=30, pady=6
+                           ).grid(row=r, column=spalte, padx=1, pady=1)
 
-    tk.Button(kopf, text="<", font=FONT_B, bg=BG2, fg=TEXT, relief="flat", padx=10,
-              command=lambda: blaettern(-1)).pack(side="left")
+    RundButton(kopf, "<", lambda: blaettern(-1), art="sekundaer", padx=10).pack(side="left")
     lbl.pack(side="left", expand=True)
-    tk.Button(kopf, text=">", font=FONT_B, bg=BG2, fg=TEXT, relief="flat", padx=10,
-              command=lambda: blaettern(1)).pack(side="right")
-    tk.Button(popup, text="Heute", font=FONT_SM, bg=WHITE, fg=ACCENT, relief="flat", cursor="hand2",
-              command=lambda: var.set(heute.strftime(config.DATUMSFORMAT)) or popup.destroy()
-              ).pack(pady=(0, 8))
+    RundButton(kopf, ">", lambda: blaettern(1), art="sekundaer", padx=10).pack(side="right")
+    RundButton(popup, "Heute", lambda: var.set(heute.strftime(config.DATUMSFORMAT)) or popup.destroy(),
+               art="sekundaer", fg=ACCENT, font=FONT_SM).pack(pady=(0, 10))
     zeichnen()
     zentrieren(popup, parent.winfo_toplevel())
     popup.wait_visibility()

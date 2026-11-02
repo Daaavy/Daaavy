@@ -296,7 +296,7 @@ def level_eingabe(app, labor: str, n_level: int = 3) -> None:
     tk.Label(kf, text="Laborpreis (EUR)", font=FONT_SM, bg=WHITE, fg=TEXT2, width=28, anchor="w").pack(side="left")
     eingabe(kf, v["k_laborpreis"], 10).pack(side="left", ipady=4, padx=(0, 8))
     tk.Checkbutton(kf, text="Kostenlos", variable=kostenlos, font=FONT_SM, bg=WHITE,
-                   activebackground=WHITE).pack(side="left")
+                   activebackground=WHITE, highlightthickness=0, bd=0).pack(side="left")
     zeile(rechts, "Berichtete Fehler", v["s_berichtet"], 6)
     zeile(rechts, "Behobene Fehler", v["s_behoben"], 6)
     zeile(rechts, "Datum Anfrage", v["s_anfrage"], datum=True)
@@ -341,7 +341,7 @@ def level_eingabe(app, labor: str, n_level: int = 3) -> None:
                 eingabe(r, vars_[k], b).pack(side="left", padx=6, pady=3, ipady=3)
             level_zeilen.append(vars_)
 
-    button(kopf, "Übernehmen", zeilen_erzeugen, art="sekundaer", pady=2).pack(side="left", padx=8)
+    button(kopf, "Übernehmen", zeilen_erzeugen, art="sekundaer", pady=4).pack(side="left", padx=8)
     zeilen_erzeugen()
 
     def zahl(name, var):

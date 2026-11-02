@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 from .. import charts, config, labor_db, scoring
 from ..storage import Datenspeicher, Preisspeicher, laenderkuerzel, neue_id
 from . import dialoge
+from .rund import RundButton, RundFrame, RundListe
 from .widgets import (ACCENT, BG, BG2, BORDER, FONT, FONT_B, FONT_H, FONT_SM, STATUS_TEXTFARBEN,
                       TEXT, TEXT2, WHITE, ScrollFrame, button, combobox, eingabe, feld, fmt,
                       karte, tabelle, ttk_stil)
@@ -45,7 +46,6 @@ class App(tk.Tk):
         self.preise = Preisspeicher()
         self.aktuelles_labor = ""
         self.bearbeitungs_id = None
-        self._listen_codes = []  # Index in der Labor-Liste -> Laborcode (None = Überschrift)
         self._benchmarks = {}
 
         self.db_ok = False
@@ -101,7 +101,9 @@ class App(tk.Tk):
                                  bg=WHITE, fg=TEXT, anchor="w")
         self.lbl_kopf.pack(side="left", padx=24, pady=12)
 
-        self.nb = ttk.Notebook(haupt)
+        reiter = tk.Frame(haupt, bg=BG)
+        reiter.pack(fill="x", padx=16, pady=(12, 0))
+        self.nb = ttk.Notebook(haupt, style="Ohne.TNotebook")
         self.nb.pack(fill="both", expand=True)
         self.tab_eingabe = self._tab_eingabe()
         self.tab_verlauf = self._tab_verlauf()
@@ -111,8 +113,15 @@ class App(tk.Tk):
         for frame, text in ((self.tab_eingabe, "Monatseingabe"), (self.tab_verlauf, "Verlauf & Score"),
                             (self.tab_uebersicht, "Übersicht"), (self.tab_diagramme, "Diagramme"),
                             (self.tab_preise, "Preisentwicklung")):
-            self.nb.add(frame, text=f"  {text}  ")
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._tab_aktualisieren())
+            self.nb.add(frame, text=text)
+        self._reiter_knoepfe = {}
+        for frame in self.nb.tabs():
+            text = self.nb.tab(frame, "text")
+            b = RundButton(reiter, text, lambda f=frame: self.nb.select(f), art="tab", font=FONT, padx=18, pady=7)
+            b.pack(side="left", padx=(0, 6))
+            self._reiter_knoepfe[frame] = b
+        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._reiter_gewechselt())
+        self._reiter_gewechselt()
 
     def _sidebar(self):
         sb = tk.Frame(self, bg=WHITE, width=200)
@@ -120,17 +129,12 @@ class App(tk.Tk):
         sb.pack_propagate(False)
         tk.Label(sb, text="LABORE", font=("Segoe UI", 7, "bold"), bg=WHITE, fg=TEXT2,
                  anchor="w", padx=16).pack(fill="x", pady=(16, 4))
-        tk.Frame(sb, bg=BORDER, height=1).pack(fill="x", padx=16, pady=(6, 4), side="bottom")
         button(sb, "Labor löschen", self._labor_loeschen_auswahl, art="sekundaer", font=FONT_SM
                ).pack(fill="x", padx=12, pady=(0, 10), side="bottom")
         button(sb, "+ Labor anlegen", lambda: dialoge.labor_anlegen(self), font=FONT_SM
                ).pack(fill="x", padx=12, pady=(0, 4), side="bottom")
-        self.lb = tk.Listbox(sb, font=FONT, bg=WHITE, fg=TEXT, relief="flat", selectbackground=BG2,
-                             selectforeground=ACCENT, activestyle="none", highlightthickness=0,
-                             bd=0, cursor="hand2", exportselection=False)
-        self.lb.pack(fill="both", expand=True, padx=8)
-        self.lb.bind("<<ListboxSelect>>", self._listbox_auswahl)
-        self.lb.bind("<Button-3>", self._labor_kontextmenue)
+        self.liste = RundListe(sb, auswahl=self._liste_klick, kontext=self._labor_kontextmenue)
+        self.liste.pack(fill="both", expand=True, padx=6)
 
     # ── Tab: Monatseingabe ────────────────────────────────────────────────
     def _tab_eingabe(self):
@@ -166,8 +170,9 @@ class App(tk.Tk):
         eingabe(top, f["pruefnummer"], 14, bg=WHITE).pack(side="left", ipady=3)
 
         # Aktionen
-        bf = tk.Frame(p, bg=WHITE, highlightthickness=1, highlightbackground=BORDER)
-        bf.pack(fill="x", padx=12, pady=(6, 8))
+        rf = RundFrame(p, radius=18, pad=4)
+        rf.pack(fill="x", padx=12, pady=(6, 10))
+        bf = rf.inhalt
         button(bf, "  Speichern  ", self.speichern, padx=20, pady=8).pack(side="left", padx=12, pady=8)
         button(bf, "Neu / Felder leeren", self.felder_leeren, art="sekundaer", pady=8).pack(side="left", pady=8)
         button(bf, "📋  Level-Eingabe", self._level_eingabe, art="sekundaer", fg=ACCENT, pady=8
@@ -200,6 +205,7 @@ class App(tk.Tk):
         self.e_preis = feld(c, "Laborpreis (EUR)", f["k_laborpreis"])
         tk.Checkbutton(c, text="Kostenloses Labor (Score = 100 %)", variable=self.k_kostenlos,
                        font=FONT_SM, bg=WHITE, fg=TEXT2, activebackground=WHITE, cursor="hand2",
+                       highlightthickness=0, bd=0,
                        command=self._kostenlos_umschalten).pack(anchor="w", padx=12, pady=(0, 8))
 
         c = karte(rechts, f"Service (Gewicht {_gewicht('service')})")
@@ -211,9 +217,11 @@ class App(tk.Tk):
         tk.Frame(c, bg=WHITE, height=6).pack()
 
         c = karte(links, "Kommentar")
-        self.e_kommentar = tk.Text(c, font=FONT, height=4, relief="flat", highlightthickness=1,
-                                   highlightbackground=BORDER, bg=BG, wrap="word")
-        self.e_kommentar.pack(fill="x", padx=12, pady=(6, 10))
+        kr = RundFrame(c, bg=BG, radius=10, pad=6)
+        kr.pack(fill="x", padx=12, pady=(4, 10))
+        self.e_kommentar = tk.Text(kr.inhalt, font=FONT, height=4, relief="flat", bd=0,
+                                   highlightthickness=0, bg=BG, wrap="word")
+        self.e_kommentar.pack(fill="x")
 
         for var in self.formular.values():
             var.trace_add("write", lambda *_: self._vorschau())
@@ -253,10 +261,10 @@ class App(tk.Tk):
     # ── Tab: Übersicht ────────────────────────────────────────────────────
     def _tab_uebersicht(self):
         frame = tk.Frame(self.nb, bg=BG)
-        top = tk.Frame(frame, bg=WHITE)
+        top = tk.Frame(frame, bg=BG)
         top.pack(fill="x", padx=20, pady=(14, 8))
-        tk.Label(top, text="Übersicht", font=FONT_H, bg=WHITE, fg=TEXT).pack(side="left")
-        tk.Label(top, text="Produkt:", font=FONT, bg=WHITE, fg=TEXT2).pack(side="left", padx=(24, 4))
+        tk.Label(top, text="Übersicht", font=FONT_H, bg=BG, fg=TEXT).pack(side="left")
+        tk.Label(top, text="Produkt:", font=FONT, bg=BG, fg=TEXT2).pack(side="left", padx=(24, 4))
         self.uebersicht_produkt = tk.StringVar(value="Alle")
         self.cb_uebersicht_produkt = combobox(top, self.uebersicht_produkt, ["Alle"], 20)
         self.cb_uebersicht_produkt.pack(side="left")
@@ -265,7 +273,6 @@ class App(tk.Tk):
                art="sekundaer", fg=ACCENT).pack(side="right")
         button(top, "📋  Detail + Berechnung als PDF", lambda: dialoge.pdf_export(self, "detail"),
                art="sekundaer", fg=ACCENT).pack(side="right", padx=8)
-        tk.Frame(frame, bg=BORDER, height=1).pack(fill="x")
         tk.Label(frame, text="Doppelklick auf eine Zeile öffnet den Eintrag zur Bearbeitung.",
                  font=FONT_SM, bg=BG, fg=TEXT2, anchor="w").pack(fill="x", padx=20, pady=(6, 2))
         self.tree_uebersicht = tabelle(frame, {
@@ -278,30 +285,30 @@ class App(tk.Tk):
 
     # ── Tab: Diagramme ────────────────────────────────────────────────────
     def _tab_diagramme(self):
-        frame = tk.Frame(self.nb, bg=WHITE)
-        top = tk.Frame(frame, bg=WHITE)
+        frame = tk.Frame(self.nb, bg=BG)
+        top = tk.Frame(frame, bg=BG)
         top.pack(fill="x", padx=20, pady=12)
         self.diag_labor = tk.StringVar(value="Alle")
         self.diag_produkt = tk.StringVar(value="Alle")
-        tk.Label(top, text="Labor:", font=FONT, bg=WHITE, fg=TEXT2).pack(side="left")
+        tk.Label(top, text="Labor:", font=FONT, bg=BG, fg=TEXT2).pack(side="left")
         self.cb_diag_labor = combobox(top, self.diag_labor, ["Alle"], 18)
         self.cb_diag_labor.pack(side="left", padx=6)
-        tk.Label(top, text="Produkt:", font=FONT, bg=WHITE, fg=TEXT2).pack(side="left", padx=(12, 0))
+        tk.Label(top, text="Produkt:", font=FONT, bg=BG, fg=TEXT2).pack(side="left", padx=(12, 0))
         self.cb_diag_produkt = combobox(top, self.diag_produkt, ["Alle"], 18)
         self.cb_diag_produkt.pack(side="left", padx=6)
         self.diag_labor.trace_add("write", lambda *_: self.diagramme_aktualisieren())
         self.diag_produkt.trace_add("write", lambda *_: self.diagramme_aktualisieren())
-        self.diag_scroll = ScrollFrame(frame)
-        self.diag_scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        rd = RundFrame(frame, radius=16, pad=10, fuellen=True)
+        rd.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+        self.diag_scroll = ScrollFrame(rd.inhalt)
+        self.diag_scroll.pack(fill="both", expand=True)
         return frame
 
     # ── Tab: Preisentwicklung ─────────────────────────────────────────────
     def _tab_preise(self):
         frame = tk.Frame(self.nb, bg=BG)
-        h = tk.Frame(frame, bg=WHITE)
-        h.pack(fill="x")
-        tk.Label(h, text="Preisentwicklung", font=FONT_H, bg=WHITE, fg=TEXT).pack(side="left", padx=24, pady=14)
-        tk.Frame(frame, bg=BORDER, height=1).pack(fill="x")
+        tk.Label(frame, text="Preisentwicklung", font=FONT_H, bg=BG, fg=TEXT, anchor="w"
+                 ).pack(fill="x", padx=24, pady=(14, 0))
 
         ff = tk.Frame(frame, bg=BG)
         ff.pack(fill="x", padx=24, pady=10)
@@ -316,9 +323,9 @@ class App(tk.Tk):
         self.pe_labor.trace_add("write", lambda *_: self.preise_aktualisieren())
         self.pe_produkt.trace_add("write", lambda *_: self.preise_aktualisieren())
 
-        self.pe_chart = tk.Frame(frame, bg=WHITE, highlightthickness=1, highlightbackground=BORDER, height=270)
-        self.pe_chart.pack(fill="x", padx=24, pady=(0, 10))
-        self.pe_chart.pack_propagate(False)
+        rc = RundFrame(frame, radius=16, pad=8, fuellen=True, height=280)
+        rc.pack(fill="x", padx=24, pady=(0, 10))
+        self.pe_chart = rc.inhalt
 
         # Manuelle Pflege
         mf = tk.Frame(frame, bg=BG)
@@ -368,6 +375,12 @@ class App(tk.Tk):
         self._tab_aktualisieren()
         self._vorschau()
 
+    def _reiter_gewechselt(self):
+        aktiv = self.nb.select()
+        for frame, b in self._reiter_knoepfe.items():
+            b.setze_art("tab_aktiv" if frame == aktiv else "tab")
+        self._tab_aktualisieren()
+
     def _tab_aktualisieren(self):
         aktiv = self.nb.select()
         if aktiv == str(self.tab_diagramme):
@@ -380,35 +393,16 @@ class App(tk.Tk):
 
     # ── Labor-Liste ───────────────────────────────────────────────────────
     def labor_liste_aktualisieren(self):
-        self.lb.delete(0, "end")
-        self._listen_codes = []
-        land = None
+        zeilen, land = [], None
         for code in self.store.labore():
             if laenderkuerzel(code) != land:
                 land = laenderkuerzel(code)
-                self.lb.insert("end", f"── {land} ──")
-                self.lb.itemconfig("end", fg=TEXT2, selectbackground=WHITE, selectforeground=TEXT2)
-                self._listen_codes.append(None)
-            self.lb.insert("end", f"   {code}")
-            self._listen_codes.append(code)
-        self._listbox_markieren(self.aktuelles_labor)
+                zeilen.append((None, land))
+            zeilen.append((code, code))
+        self.liste.setze(zeilen)
+        self.liste.markiere(self.aktuelles_labor)
 
-    def _listbox_markieren(self, code):
-        self.lb.selection_clear(0, "end")
-        if code in self._listen_codes:
-            i = self._listen_codes.index(code)
-            self.lb.selection_set(i)
-            self.lb.see(i)
-
-    def _code_an(self, index):
-        return self._listen_codes[index] if 0 <= index < len(self._listen_codes) else None
-
-    def _listbox_auswahl(self, event=None):
-        sel = self.lb.curselection()
-        code = self._code_an(sel[0]) if sel else None
-        if code is None:
-            self._listbox_markieren(self.aktuelles_labor)
-            return
+    def _liste_klick(self, code, _event=None):
         if code != self.aktuelles_labor:
             self.labor_waehlen(code, nachfragen=True)
 
@@ -416,7 +410,7 @@ class App(tk.Tk):
         if nachfragen and self.aktuelles_labor and self._formular_befuellt():
             antwort = dialoge.frage_laborwechsel(self, code)
             if antwort == "abbrechen":
-                self._listbox_markieren(self.aktuelles_labor)
+                self.liste.markiere(self.aktuelles_labor)
                 return False
             if antwort == "verwerfen":
                 self.felder_leeren()
@@ -426,16 +420,13 @@ class App(tk.Tk):
             self.felder_leeren()
         self.aktuelles_labor = code
         self.lbl_kopf.config(text=code)
-        self._listbox_markieren(code)
+        self.liste.markiere(code)
         self.verlauf_aktualisieren()
         self._preis_vorschlagen()
         self._vorschau()
         return True
 
-    def _labor_kontextmenue(self, event):
-        code = self._code_an(self.lb.nearest(event.y))
-        if not code:
-            return
+    def _labor_kontextmenue(self, code, event):
         menu = tk.Menu(self, tearoff=0, bg=WHITE, fg=TEXT, activebackground=BG2,
                        activeforeground=ACCENT, font=FONT_SM)
         menu.add_command(label=f"  {code}", state="disabled")
@@ -449,10 +440,8 @@ class App(tk.Tk):
         menu.tk_popup(event.x_root, event.y_root)
 
     def _labor_loeschen_auswahl(self):
-        sel = self.lb.curselection()
-        code = self._code_an(sel[0]) if sel else None
-        if code:
-            self._labor_loeschen(code)
+        if self.aktuelles_labor:
+            self._labor_loeschen(self.aktuelles_labor)
 
     def _labor_loeschen(self, code):
         anzahl = len(self.store.daten.get(code, []))
@@ -665,9 +654,9 @@ class App(tk.Tk):
                                    ("Gewichteter Score", fmt(gew), ACCENT),
                                    ("Status", status_text, STATUS_TEXTFARBEN[key]),
                                    ("Einträge", str(len(eintraege)), TEXT)):
-            k = tk.Frame(self.score_frame, bg=WHITE, padx=16, pady=10,
-                         highlightthickness=1, highlightbackground=BORDER)
-            k.pack(side="left", padx=(0, 10))
+            rk = RundFrame(self.score_frame, radius=16, pad=10)
+            rk.pack(side="left", padx=(0, 10))
+            k = rk.inhalt
             tk.Label(k, text=label, font=FONT_SM, bg=WHITE, fg=TEXT2).pack()
             tk.Label(k, text=wert, font=("Segoe UI", 16, "bold"), bg=WHITE, fg=farbe).pack()
         for e, sc in zip(reversed(eintraege), reversed(scores)):  # neueste oben
