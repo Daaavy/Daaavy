@@ -2,14 +2,16 @@ Analyte Comparison / Wertezuweisung
 ===================================
 
 Starten (Windows)
-  Doppelklick auf "Wertezuweisung_starten.bat".
-  Beim ersten Start werden die Zusatzpakete (pdfplumber, reportlab, sv-ttk fuer
-  das moderne Aussehen, tkinterdnd2 zum Hineinziehen von PDFs) automatisch
-  installiert. Voraussetzung: Python 3 ist installiert
+  Doppelklick auf "Wertezuweisung.pyw"  (empfohlen - ohne schwarzes Fenster,
+  funktioniert auch im Netzwerkordner \\server\...).
+  Fehlen beim ersten Start Zusatzpakete (pdfplumber, reportlab, sv-ttk für das
+  moderne Aussehen, tkinterdnd2 zum Hineinziehen von PDFs), fragt das Programm
+  und installiert sie selbst.
+  Voraussetzung: Python 3 ist installiert
   (https://www.python.org/downloads/, beim Installieren "Add python.exe to PATH" anhaken).
 
-  Ohne Starter:  python Wertezuweisung.py
-  (vorher einmalig: pip install -r requirements.txt)
+  Alternativ: "Wertezuweisung_starten.bat" (zeigt ein schwarzes Fenster mit
+  eventuellen Fehlermeldungen - praktisch, wenn etwas nicht klappt).
 
 Alle Dateien im selben Ordner belassen.
 
